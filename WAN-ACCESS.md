@@ -76,6 +76,7 @@ tar xzf ashare-src-20260919.tar.gz
 
 > 包由 `git archive` 生成，天然只含已入库文件：172 个文件，**不含** `.env` / `deploy/remote.py` / `prisma/dev.db` / `.git`（已核查）。
 > 旧包 `ashare-src-20260918.tar.gz` 仍在服务器上，可留作对比。
+> 包 MD5 每次重新打包都会变（因为包内含本文件），**以服务器端 `md5sum` 输出为准**，本文件不写死该值。
 
 ### 方式 3：什么都不装 → 浏览器进腾讯云控制台
 
@@ -133,7 +134,7 @@ git config core.sshCommand "ssh -i ~/.ssh/ashare_deploy"
 /home/ubuntu/repos/a-share-sim-trading.git   # 裸仓库，main @ 500ceb2
 /home/ubuntu/src/a-share-sim-trading         # 纯源码副本（09-18）
 /home/ubuntu/app                             # 线上运行目录（standalone 产物 + dev.db）
-/home/ubuntu/ashare-src-20260919.tar.gz      # 最新源码包 357KB MD5 f2d287605c6ec76b25245fccc83fa79f
+/home/ubuntu/ashare-src-20260919.tar.gz      # 最新源码包 357KB（MD5 见服务器端 md5sum）
 /home/ubuntu/ashare-src-20260918.tar.gz      # 上一版源码包 339KB
 磁盘：40G 总 / 13G 已用 / 26G 可用（33%）
 ```
