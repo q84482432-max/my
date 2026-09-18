@@ -1,6 +1,6 @@
 # 源码 ↔ 线上 分叉清单（SOURCE-SYNC-TODO）
 
-> 核对时间：2026-09-18 23:45（远程 SSH 实测 + 本机核查，非推断）
+> 核对时间：2026-09-18 23:58（远程 SSH 实测 + 本机核查，非推断）
 > 服务器：`111.229.225.7` · 线上入口 `http://111.229.225.7/app`
 > **核心结论：线上跑的是「补丁版」。多个改动从未回写源码，重新构建部署会静默丢失。**
 
@@ -16,8 +16,8 @@
 | 行情日更 | `market-update.timer` active；09-18 15:45 + 17:31 两次均成功（5558/5558，0 失败） |
 | 数据库备份 | `db-backup.timer` active；09-18 16:31 备份 190.4MB，integrity=ok |
 | 库内数据 | 最新交易日 **2026-09-18**，`klines` 2,379,962 行，5558 只 |
-| 服务器有无源码 | ❌ **无**（`/home/ubuntu/app` 只有构建产物 + node_modules） |
-| 版本控制 | 服务器无 `.git`；**本机项目已于 2026-09-18 完成 git 化**（`main` 分支，124 文件首次入库） |
+| 服务器源码 | ✅ 已有纯源码副本 `/home/ubuntu/src/a-share-sim-trading`（125 文件，**不参与运行**） |
+| 版本控制 | 服务器运行目录无 `.git`；服务器源码副本为 `git archive` 快照（无历史）；**本机项目已于 2026-09-18 git 化**（`main`，提交 `4edf9f6`） |
 
 ---
 
@@ -32,7 +32,7 @@
 - 线上处置（09-18 21:21）：直接把补丁打进 `~/.next/server/chunks/75.js`（+ standalone 副本），原文件备份在
   `~/backup/drawdown-fix-20260918-212145/`
 - **本次源码回写**：改为直接复用 `calcMaxDrawdown`，消除重复实现
-- 验证：`test:backtest` **134 通过 / 0 失败**（含「回撤起止日经 DB 往返后仍与资金曲线自洽」）
+- 验证：`test:backtest` **134 通过 / 0 失败**；服务器源码副本已核对（`calcMaxDrawdown` 在位、旧算法 0 残留）
 - ⚠️ 需重新构建部署后源码版才生效；在此之前线上仍是 chunk 热修版（两者行为一致）
 
 ---
@@ -70,8 +70,11 @@
 - 把 09-16 网吧机留档 `workbuddy-export`（**101 个文件**）从服务器取回本机 `WorkBuddy/workbuddy-export/`
   （该机装还原卡，本地文件会消失；README 里的 scp 一直没执行）
 - 其中 `ui-design/`（DESIGN.md + PATCH-CHAIN.md + 5 个补丁脚本 + 全部回滚备份）已复制进项目 `deploy/ui-design/`
-- **项目完成 git 化**：`main` 分支，首次入库 124 个文件；`node_modules`/`.next`/`prisma/*.db`（763MB）/
+- **项目完成 git 化**：`main` 分支，首次提交 `4edf9f6`，124 个文件；`node_modules`/`.next`/`prisma/*.db`（763MB）/
   `.env`/`deploy/remote.py` 均已排除
+- **源码已上传服务器副本** `/home/ubuntu/src/a-share-sim-trading`：
+  由 `git archive` 导出（124 文件，339KB），包 MD5 `c6417a752458d8ab9c93f523f25de4ea` 双向校验一致；
+  未含 `node_modules`/`.next`/`dev.db`/`.env`/`deploy/remote.py`；附 `README-SERVER-COPY.md` 说明与运行目录的关系
 - 临时排查脚本已清理
 
 ---
@@ -80,6 +83,7 @@
 
 1. 换掉服务器 `ubuntu` 密码（并把 `deploy/remote.py` 的凭据改走环境变量）
 2. 按 `deploy/ui-design/DESIGN.md` 把 UI 主题（含 v2b/v3 两条窄屏规则）实现回源码
-3. 把源码推到远端私有仓库（本地 `.git` 只是第一层保险，服务器上的源码副本仍需单独上传）
+3. 把项目推到**远端私有仓库**（本地 `.git` + 服务器源码副本已是两层保险，但都在同一账号/同一云下，
+   远端才是真正的异地冗余）
 4. 重新构建 → 上传 standalone → 换 `.next` 指纹 → 验证 `/app` 七页
 5. 清理残渣 234MB、装 sqlite3、更新 `MARKET-DATA-OPS.md`（补上 workbench 反代一节）
