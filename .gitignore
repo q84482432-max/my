@@ -1,0 +1,55 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# database (SQLite 开发库不入库)
+/prisma/*.db
+/prisma/*.db-journal
+/prisma/migrations/dev.db*
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# env
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# 真实行情数据源（用户自行放置，不提交）
+/data/raw/
+/data/*.csv
+!/data/sample/*.json
+
+# ── 凭据：含服务器明文密码，永不入库（模板见 deploy/remote.example.py）
+/deploy/remote.py
+/deploy/_tmp_*.py
+
+# ── 本机环境变量（模板见 .env.example）
+.env
+
+# ── 部署中间产物与打包残渣
+/.deploy-bundle/
+/.deploy-delta/
+/.tmp-run/
+*.tar.gz
+/build-standalone.log
+
+# ── python
+__pycache__/
+*.pyc

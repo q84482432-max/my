@@ -1,0 +1,126 @@
+/* ============================================================================
+   A股模拟交易 · 线上主题补丁 (theme-patch.css)
+   ----------------------------------------------------------------------------
+   用途：不重新构建，即可让线上页面从"整片纯白"变为有层级的仪表盘视觉。
+   生效原理：线上 DOM 全部使用语义令牌类（bg-card / bg-background / bg-muted /
+             text-muted-foreground / text-stock-up ...），未硬编码白色，
+             因此覆盖 :root 变量即可全站生效。
+   回滚：删除对 /theme-patch.css 的引用即可，零残留。
+   规范依据：DESIGN.md §2 / §4 / §6
+   ==========================================================================*/
+
+/* ==================== 第 1 段：核心令牌（必装） ==================== */
+/* 这一段是全部改动的主体。仅这一段就能消除"整片白"。 */
+:root {
+  /* --- 表面层级：从"三层同为纯白"改为"冷灰画布 + 白卡" --- */
+  --background: 214 41% 97%;          /* #F3F6FA 画布（原 0 0% 100%） */
+  --card: 0 0% 100%;                  /* #FFFFFF 卡片（保持） */
+  --popover: 0 0% 100%;
+  --muted: 216 45% 98%;               /* #F7F9FC 表头 / 分区底（原 210 40% 96%） */
+  --accent: 222 100% 97%;             /* #EEF3FF 悬停底（原 210 40% 96% 灰） */
+
+  /* --- 边框：由灰转冷，与新画布同色系 --- */
+  --border: 217 30% 92%;              /* #E3E8F0（原 214 32% 91%） */
+  --input: 216 29% 87%;               /* #D3DBE7 加强输入框边界（原 214 32% 91%） */
+
+  /* --- 文字：保持，仅补一档次文字 --- */
+  --foreground: 222 47% 11%;
+  --card-foreground: 222 47% 11%;
+  --muted-foreground: 215 16% 47%;
+  --accent-foreground: 225 77% 44%;
+
+  /* --- 品牌蓝：向更"企业蓝"收敛 --- */
+  --primary: 225 81% 52%;             /* #2154E8（原 221 83% 53% #2563EB） */
+  --primary-foreground: 0 0% 100%;
+  --ring: 225 90% 60%;                /* #3B6BF5 聚焦环 */
+
+  /* --- 行情语义：修正绿(跌)对比度不足，红涨绿跌方向不变 --- */
+  --stock-up: 0 75% 45%;              /* #C91D1D 白底 5.71:1（原 #EB1414 为 4.52） */
+  --stock-down: 142 72% 29%;          /* #157F3C 白底 5.08:1（原 #1EAE53 仅 2.96，不达 AA） */
+  --stock-flat: 215 16% 47%;
+
+  /* --- 新增：图形级行情色（K线/图例用，≥3:1 即可） --- */
+  --up-graphic: #D93A3A;
+  --dn-graphic: #18A05C;
+
+  /* --- 新增：表面层级扩展 --- */
+  --surface-subtle: #F7F9FC;
+  --surface-sunken: #EDF1F7;
+
+  /* --- 圆角：由 8px 提到 12px，与卡片尺度匹配 --- */
+  --radius: 0.75rem;
+}
+
+/* ==================== 第 2 段：深度与表格（建议装） ==================== */
+/* 线上 shadow-sm 偏重且与 12px 圆角不匹配，收敛一档 */
+.shadow-sm {
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06) !important;
+}
+
+/* 表头补底色 —— 这是"白成一片"最明显的第二处。
+   线上 th 只有 text-muted-foreground，没有底色，表头与表体无法区分。 */
+thead tr {
+  background: hsl(var(--muted));
+}
+thead th {
+  font-weight: 600 !important;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+/* 表体行分隔线用更浅的冷灰，降低长列表的网格噪点 */
+tbody tr {
+  border-bottom-color: #EEF2F8 !important;
+}
+tbody tr:last-child {
+  border-bottom: 0 !important;
+}
+
+/* 内容区宽度：1400px 下单行表格视线跨度过大，收到 1320px */
+.max-w-\[1400px\] {
+  max-width: 1320px !important;
+}
+
+/* ==================== 第 3 段：深色顶栏（可选，视觉改动最大） ==================== */
+/* 这是本补丁中唯一"改变产品观感"的部分。若产品已有既定视觉，可整段删除，
+   删掉后第 1、2 段仍然生效，页面依然是"冷灰画布 + 白卡"的有层级版本。 */
+header.sticky {
+  background: linear-gradient(180deg, #152945 0%, #0D1A2E 100%) !important;
+  border-bottom-color: rgba(255, 255, 255, .08) !important;
+  backdrop-filter: none !important;
+}
+header.sticky .text-base.font-semibold { color: #fff; }
+header.sticky .rounded.bg-muted {
+  background: rgba(255, 255, 255, .08) !important;
+  color: #9DB0CC !important;
+}
+header.sticky nav a {
+  color: #A8B8D0 !important;                 /* 于 #0D1A2E 上 8.66:1，AAA */
+}
+header.sticky nav a:hover {
+  background: rgba(255, 255, 255, .09) !important;
+  color: #fff !important;
+}
+/* 选中态：半透明品牌底 + 内描边，避免深底上色块过重 */
+header.sticky nav a[aria-current="page"],
+header.sticky nav a.active {
+  background: rgba(78, 123, 255, .26) !important;
+  color: #fff !important;
+  box-shadow: inset 0 0 0 1px rgba(130, 170, 255, .4);
+}
+
+/* ==================== 第 4 段：数字等宽（建议装） ==================== */
+/* 默认比例数字会让行情表格的数字列左右跳动。 */
+.font-mono,
+td.text-right,
+th.text-right {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ==================== 无障碍 ==================== */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+  }
+}

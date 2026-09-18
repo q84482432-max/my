@@ -1,0 +1,172 @@
+/* ============================================================================
+   A股模拟交易 · 线上主题覆盖补丁 (theme-override.css)
+   ----------------------------------------------------------------------------
+   落地方式：零构建覆盖 —— 追加到 Next 构建产物 CSS 末尾，不重新构建。
+   目标文件：/home/ubuntu/app/.next/static/css/1f03992f2f77f6cc.css
+   规范依据：DESIGN.md §2 §4 §5 §6 §7
+   回滚方式：cp 回同目录下的 css-backup-*.css 即可，零残留。
+
+   【与 theme-patch.css 的差别 —— 重要】
+   上一版 theme-patch.css 按 DESIGN.md 的"规范类名"（.card / .tbl / .chip / .btn）
+   书写，但这些类在线上 DOM 中并不存在。线上页面全部由 Tailwind 工具类构成，
+   因此上一版只有 :root 令牌那一段能真正生效，其余段落是空转的。
+   本版按"线上真实类名"重写，逐条对应，全部可验证。
+
+   线上真实结构（2026-09-18 实测）：
+     顶栏   <header class="sticky top-0 z-40 border-b bg-background/95 backdrop-blur ...">
+     导航   <nav class="flex items-center gap-1"><a class="rounded-md px-3 py-1.5 text-sm
+                 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+     卡片   class="rounded-lg border bg-card text-card-foreground shadow-sm"
+     表格   <table class="w-full caption-bottom text-sm"><thead class="[&_tr]:border-b">
+     宽度   顶栏内层 max-w-[1400px]；内容区 max-w-[1400px] 或 w-full max-w-7xl（两者不一致）
+   ==========================================================================*/
+
+
+/* ==================== 第 1 段：核心令牌（必装） ==================== */
+/* 消除"整片纯白"的主体。线上 :root 中 --background / --card / --popover
+   三者同为 0 0% 100%，导致页面底与卡片同色、层级完全塌陷。 */
+:root {
+  /* --- 表面层级：冷灰画布 + 纯白卡片 --- */
+  --background: 214 41% 97%;          /* #F3F6FA  画布（原 0 0% 100% 纯白） */
+  --card: 0 0% 100%;                  /* #FFFFFF  内容面（保持） */
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+  --muted: 216 45% 98%;               /* #F7F9FC  表头 / 分区底（原 210 40% 96%） */
+  --accent: 222 100% 97%;             /* #EEF3FF  悬停底（原 210 40% 96% 灰） */
+  --accent-foreground: 225 77% 44%;   /* #1A44C4 */
+
+  /* --- 边框：由暖灰转冷灰，与画布同色系 --- */
+  --border: 217 30% 92%;              /* #E3E8F0（原 214 32% 91%） */
+  --input: 216 29% 87%;               /* #D3DBE7  加强输入框边界 */
+
+  /* --- 文字：--muted-foreground 线上已是 215 16% 47%，无需改 --- */
+  --foreground: 222 47% 11%;
+  --card-foreground: 222 47% 11%;
+
+  /* --- 品牌蓝：向企业蓝收敛 --- */
+  --primary: 225 81% 52%;             /* #2154E8（原 221 83% 53% #2563EB） */
+  --primary-foreground: 0 0% 100%;
+  --ring: 225 90% 60%;                /* #3B6BF5 */
+
+  /* --- 行情语义：修正跌绿对比度不足，涨红跌绿方向不变 --- */
+  --stock-up: 0 75% 45%;              /* #C91D1D  白底 5.72:1（原 #EB1414 为 4.52，涨浅底上仅 3.86） */
+  --stock-down: 142 72% 29%;          /* #157F3C  白底 5.07:1（原 #1EAE53 仅 2.96，不达 AA 正文要求） */
+  --stock-flat: 215 16% 47%;          /* #64748B */
+
+  /* --- 圆角：8px → 12px，与卡片尺度匹配 --- */
+  --radius: 0.75rem;
+
+  /* --- 新增：DESIGN.md 定义但线上缺失的层级与图形级色 --- */
+  --canvas: #F3F6FA;
+  --surface-subtle: #F7F9FC;
+  --surface-sunken: #EDF1F7;
+  --border-strong: #D3DBE7;
+  --up-graphic: #D93A3A;              /* K线/图例用，4.55:1 */
+  --dn-graphic: #18A05C;              /* K线/图例用，3.38:1（图形元素 ≥3:1 即可） */
+}
+
+
+/* ==================== 第 2 段：卡片与深度 ==================== */
+/* 线上 .shadow-sm 为 0 1px 2px rgb(0 0 0/0.05)，配合 12px 圆角偏脏；
+   收敛为双层冷调投影（DESIGN.md §6.2 --sh1）。 */
+.shadow-sm {
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06) !important;
+}
+
+
+/* ==================== 第 3 段：深色顶栏 ==================== */
+/* 本补丁中唯一"改变产品观感"的部分。深色 chrome 是产品识别点，
+   同时给页面上沿一个视觉闭合，让下方画布的浅有参照。
+   若要撤销此段，删掉第 3 段全部内容即可，第 1、2、4、5 段仍独立生效。 */
+header.sticky {
+  background: linear-gradient(180deg, #152945 0%, #0D1A2E 100%) !important;
+  border-bottom-color: rgba(255, 255, 255, .08) !important;
+  backdrop-filter: none !important;   /* 底色已实心，模糊是纯 GPU 浪费 */
+}
+/* 站名 */
+header.sticky .text-base.font-semibold {
+  color: #FFFFFF !important;
+}
+/* DEMO 徽标：原 bg-muted + text-muted-foreground 在深底上不可读 */
+header.sticky span.bg-muted {
+  background: rgba(255, 255, 255, .08) !important;
+  color: #9DB0CC !important;
+}
+/* 导航项：浅字于 #0D1A2E 上 8.66:1（AAA） */
+header.sticky nav a {
+  color: #A8B8D0 !important;
+}
+header.sticky nav a:hover {
+  background: rgba(255, 255, 255, .09) !important;
+  color: #FFFFFF !important;
+}
+/* 当前页选中态：半透明品牌底 + 内描边（避免深底上纯色块过重）。
+   线上 DOM 原本没有 aria-current / .active 标记 —— 由随附的 nav-active.js
+   在浏览器端补上该属性；若脚本未注入，此规则静默不生效，无副作用。 */
+header.sticky nav a[aria-current="page"] {
+  background: rgba(78, 123, 255, .26) !important;
+  color: #FFFFFF !important;
+  box-shadow: inset 0 0 0 1px rgba(130, 170, 255, .4);
+}
+
+
+/* ==================== 第 4 段：表格 ==================== */
+/* 线上表头 th 只有 text-muted-foreground，没有底色，表头与表体无法区分。
+   这是"白成一片"的第二处根因，补底色后长列表才有扫描锚点。 */
+thead tr,
+thead tr:hover {
+  background: hsl(var(--muted)) !important;
+}
+thead th {
+  font-weight: 600 !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+}
+/* 表体行分隔线用更浅的冷灰，降低 5558 行长列表的网格噪点 */
+tbody tr {
+  border-bottom-color: #EEF2F8 !important;
+}
+tbody tr:last-child {
+  border-bottom: 0 !important;
+}
+/* 行悬停：线上 hover:bg-muted/50 在新令牌下过浅，改用 DESIGN.md §4.4 指定值 */
+tbody tr:hover {
+  background-color: #F6F9FD !important;
+}
+/* 空态虚线框改用强调边框色，避免与常规分隔线混淆 */
+.border-dashed {
+  border-color: var(--border-strong);
+}
+
+
+/* ==================== 第 5 段：栅格宽度 ==================== */
+/* 线上宽度不一致：顶栏内层 max-w-[1400px]，而 /account /sim /backtest 三页
+   内容区是 w-full max-w-7xl（1280px）—— 顶栏比内容宽 120px，边缘对不齐。
+   统一收到 DESIGN.md §5.1 规定的 1320px。 */
+.max-w-\[1400px\] {
+  max-width: 1320px !important;
+}
+.mx-auto.w-full.max-w-7xl {
+  max-width: 1320px !important;
+}
+
+
+/* ==================== 第 6 段：数字等宽 ==================== */
+/* 线上已有 .tabular（font-variant-numeric:tabular-nums）但只用于个别元素；
+   行情表格的数字列必须等宽，否则数值变化时列宽左右跳动。 */
+.tabular,
+td,
+th {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+
+/* ==================== 第 7 段：无障碍 ==================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+  }
+}

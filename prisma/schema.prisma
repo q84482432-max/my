@@ -1,0 +1,455 @@
+// Prisma schema —— A股模拟交易平台
+// 数据源：SQLite（开发期）。设计上字段与索引已为「多年历史数据」预留扩展空间。
+//
+// 设计原则：
+// 1. Kline 表以 (stockId, period, tradeDate) 唯一索引，支持日/周/月多种周期共存，
+//    也可平滑扩展到分钟级（新增 period 枚举值 + intradayTime 即可）。
+// 2. 所有价格字段使用 Decimal，避免浮点误差；SQLite 下以 DECIMAL 存储。
+// 3. 交易相关表分离 Order（委托）/ Trade（成交）/ Position（持仓），
+//    便于第二阶段支持部分成交、撤单等真实撮合语义。
+// 4. DailyAsset 每日快照账户净值，用于收益曲线与最大回撤计算。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 用户
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  nickname  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts         Account[]
+  simulations      Simulation[]
+  simTradeSessions SimTradeSession[]
+
+  @@map("users")
+}
+
+/// 模拟账户：一个用户可有多个账户（如不同策略/不同初始资金）
+///
+/// 两类账户**严格解耦**：
+///  - 普通模拟账户：`simulationId` 为 null（由 ensureDefaultAccount 解析）
+///  - 历史模拟会话账户：`simulationId` 指向其 Simulation（1:1，随会话级联删除）
+/// 两者复用同一套 tradingEngine 交易规则与 Position/Order/Trade/DailyAsset 结构，
+/// 但账户实体、API 命名空间（/api/account* vs /api/sim/*）与页面完全独立。
+model Account {
+  id            String   @id @default(cuid())
+  userId        String
+  name          String
+  /// 初始资金
+  initialCash   Decimal  @default(100000)
+  /// 可用现金
+  availableCash Decimal  @default(100000)
+  /// 冻结资金（挂单占用）
+  frozenCash    Decimal  @default(0)
+  /// 所属历史模拟会话；null = 普通模拟账户
+  simulationId  String?  @unique
+  /// 所属模拟炒股（猜股票）会话；null = 非该玩法账户
+  simTradeSessionId String? @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  simulation  Simulation?  @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  simTradeSession SimTradeSession? @relation(fields: [simTradeSessionId], references: [id], onDelete: Cascade)
+  positions   Position[]
+  orders      Order[]
+  trades      Trade[]
+  dailyAssets DailyAsset[]
+  backtests   Backtest[]
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// 历史模拟交易会话
+///
+/// 语义：用户在 [startDate, endDate] 区间内按**真实历史交易日逐日推进**进行交易。
+///  - `currentDate` 是唯一允许读取行情的上界（服务端强制，接口不接受客户端覆盖）：
+///    任何价格/市值/盈亏计算都必须以 tradeDate <= currentDate 的最后一根日K为准，
+///    保证「模拟日期 2025-10-01 时绝不读到 2025-10-02 及以后的行情」。
+///  - 每个会话**独占一个 Account**（Account.simulationId 反向指向本表），
+///    与普通模拟账户完全解耦，互不影响。
+///  - 每日推进时由 tradingEngine.settleT1 解冻可卖份额，并 refreshDailyAsset
+///    重算现金 / 持仓市值 / 总资产 / 当日收益 / 累计收益（最大回撤由快照序列导出）。
+model Simulation {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+  /// 用户选择的模拟区间起止（自然日）
+  startDate DateTime
+  endDate   DateTime
+  /// 初始资金（该会话专用，与普通账户互不影响）
+  initialCash Decimal @default(100000)
+  /// 当前模拟交易日（行情可见上界），始终是一个真实交易日
+  currentDate DateTime
+  /// 该会话区间的**真实交易日历**（JSON 字符串数组，YYYY-MM-DD 升序，创建时固化）。
+  /// 固化原因：① 逐日推进只走真实交易日，不受数据后续变化影响；
+  ///          ② 交易日总数 / 当前进度 / 下一交易日均可 O(1) 推出，无需反复扫K线表。
+  calendar  String
+  /// ACTIVE（进行中）| FINISHED（已走到区间末尾）
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account      Account?
+
+  @@index([userId, status])
+  @@map("simulations")
+}
+
+/// 模拟炒股（猜股票）会话 —— 「隐藏股票」的独立玩法
+///
+/// 与 Simulation 的区别：
+///  - **标的由服务端随机抽取并隐藏**（`stockCode` 只存服务端，绝不下发前端）；
+///    玩家只能看到 K 线与价格，直到结束并主动点「揭晓」才返回代码/名称。
+///  - 复用同一套 tradingEngine 交易规则（费用 / T+1 / 资金校验 / 盈亏），
+///    但**唯一持仓标的**固定为抽中的股票，账号由 tradingEngine 独占创建。
+///  - `currentDate` 是唯一的行情可见上界（服务端强制），
+///    玩家每日只能看到「当前日期及以前」的日K，未来K线绝不进入任何 HTTP 响应体。
+///
+/// 关键字段：
+///  - `hiddenStockCode`：被隐藏的标的代码，**服务端内部字段**，禁止出现在任何出参 DTO。
+///  - `adjust`：该标的复权口径（随标的固化，避免主口径/次口径混用）。
+///  - `visibleStart/visibleEnd`：抽中时标的可见历史区间（含）到模拟结束区间（含），
+///    用于回查与揭晓后对照。
+///  - `calendar`：模拟期间的**真实交易日历**（创建时固化，JSON 数组升序）。
+///  - `status`：ACTIVE | FINISHED。
+///  - `revealed`：玩家是否已揭晓股票（揭晓前接口一律不返回代码/名称）。
+model SimTradeSession {
+  id     String @id @default(cuid())
+  userId String
+  /// 会话名（不含标的任何信息，仅用于列表展示）
+  name   String
+  /// 被隐藏的标的代码（服务端内部字段，禁止下发）
+  hiddenStockCode String
+  /// 被隐藏标的的复权口径（随标的固化）
+  adjust String @default("qfq")
+  /// 初始资金
+  initialCash Decimal @default(100000)
+  /// 模拟起始交易日（真实交易日）
+  startDate DateTime
+  /// 模拟结束交易日（真实交易日）
+  endDate   DateTime
+  /// 之前可见的历史区间起点（供回查用）
+  historyStart DateTime
+  /// 之前可见的历史区间终点（= startDate 的上一交易日）
+  historyEnd   DateTime
+  /// 当前模拟交易日（行情可见上界），始终是真实交易日
+  currentDate DateTime
+  /// 已确认操作（收盘结算）的交易日；等于 currentDate 时表示「当日已确认、待进入下一交易日」
+  confirmedDate DateTime?
+  /// 模拟期间的真实交易日历（JSON 字符串数组，YYYY-MM-DD 升序）
+  calendar String
+  /// 总交易日数（冗余，= calendar.length）
+  totalDays Int @default(0)
+  /// ACTIVE（进行中）| FINISHED（已走到区间末尾）
+  status String @default("ACTIVE")
+  /// 玩家是否已揭晓股票
+  revealed Boolean @default(false)
+  /// 揭晓时间
+  revealedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account Account?
+
+  @@index([userId, status])
+  @@map("sim_trade_sessions")
+}
+
+/// 股票基础信息
+model Stock {
+  id       String @id @default(cuid())
+  /// 代码，如 600036 / 000001 / 300750 / 920047
+  code     String @unique
+  /// 名称，如 招商银行
+  name     String
+  /// 交易所：SH / SZ / BJ
+  exchange String
+  /// 板块（存真实数据的中文口径）：沪主板 / 深主板 / 创业板 / 科创板 / 北交所
+  /// 展示层可按需映射为 MAIN / GEM / STAR / BSE 英文枚举（见 lib/constants.ts）
+  board    String @default("沪主板")
+  /// 行业（可选，后续可补充）
+  industry String?
+  /// 上市日期（可选）
+  listDate DateTime?
+  /// 是否退市/停牌标记
+  isActive Boolean @default(true)
+  /// 该股 K 线复权口径：qfq(前复权) | none(不复权) | hfq(后复权)
+  /// 对应真实数据索引中的 fq 字段，用于回测前置校验，避免混用口径
+  adjust       String  @default("qfq")
+  /// 是否覆盖完整窗口。真实数据中部分次新股上市晚于 warm_start，full_window=false
+  fullWindow   Boolean @default(true)
+  /// 数据源相对目录标识：full_market_qfq | full_market_extra
+  sourceDir    String?
+  /// 该股 K 线根数（冗余，便于快速统计与完整性校验）
+  barCount     Int     @default(0)
+  /// 数据窗口起点 / 终点（冗余，便于区间校验）
+  windowStart  DateTime?
+  windowEnd    DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  klines    Kline[]
+  positions Position[]
+  orders    Order[]
+  trades    Trade[]
+
+  @@index([name])
+  @@index([exchange])
+  @@index([board])
+  @@map("stocks")
+}
+
+/// K线数据。period 支持 1d / 1w / 1M（预留 1m/5m/15m/30m/60m）
+model Kline {
+  id        String   @id @default(cuid())
+  stockId   String
+  /// 周期：1d | 1w | 1M
+  period    String   @default("1d")
+  /// 交易日（收盘日期，UTC 零点）
+  tradeDate DateTime
+  open      Decimal
+  high      Decimal
+  low       Decimal
+  close     Decimal
+  /// 成交量（股）。注意：部分上游源为「手」，导入层需在 fq 元数据中标注单位并由适配层换算
+  volume    BigInt   @default(0)
+  /// 成交额（元）。真实数据源无 amount 字段，导入层按 close * volume 推导
+  amount    Decimal  @default(0)
+  /// 复权口径：none(不复权) | qfq(前复权) | hfq(后复权)
+  /// 本机导入的真实数据以 qfq 为主（5430 只），另有 128 只 raw（不复权）以 adjust="none" 存储；
+  /// 二者以 (stockId, period, tradeDate, adjust) 复合唯一键隔离，口径可区分、信息不丢失。
+  adjust    String   @default("none")
+  createdAt DateTime @default(now())
+
+  stock Stock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, period, tradeDate, adjust])
+  @@index([stockId, period, tradeDate])
+  @@index([stockId, tradeDate])
+  @@index([tradeDate])
+  @@map("klines")
+}
+
+/// 持仓
+model Position {
+  id            String   @id @default(cuid())
+  accountId     String
+  stockId       String
+  /// 持仓数量（股）
+  quantity      Int      @default(0)
+  /// 可卖数量（T+1 约束下，当日买入不可卖）
+  availableQty  Int      @default(0)
+  /// 持仓成本均价
+  avgCost       Decimal  @default(0)
+  /// 最新价（冗余，便于快速列表展示）
+  lastPrice     Decimal  @default(0)
+  /// 浮动盈亏
+  unrealizedPnl Decimal  @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  stock   Stock   @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, stockId])
+  @@index([accountId])
+  @@map("positions")
+}
+
+/// 委托单
+model Order {
+  id         String   @id @default(cuid())
+  accountId  String
+  stockId    String
+  /// 方向：BUY | SELL
+  side       String
+  /// 委托类型：MARKET(市价) | LIMIT(限价)
+  orderType  String   @default("MARKET")
+  /// 委托价格（市价单可为空）
+  price      Decimal?
+  /// 委托数量
+  quantity   Int
+  /// 已成交数量
+  filledQty  Int      @default(0)
+  /// 成交均价
+  filledPrice Decimal?
+  /// 状态：PENDING | FILLED | PARTIAL | CANCELLED | REJECTED
+  status     String   @default("PENDING")
+  /// 委托时间
+  orderTime  DateTime @default(now())
+  /// 备注/拒单原因
+  remark     String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  stock   Stock   @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  trades  Trade[]
+
+  @@index([accountId, status])
+  @@index([accountId, orderTime])
+  @@map("orders")
+}
+
+/// 成交记录
+model Trade {
+  id             String   @id @default(cuid())
+  accountId      String
+  stockId        String
+  orderId        String
+  side           String
+  price          Decimal
+  quantity       Int
+  /// 成交额 = price * quantity
+  amount         Decimal
+  /// 手续费（佣金+印花税+过户费）
+  commission     Decimal  @default(0)
+  /// 印花税
+  stampTax       Decimal  @default(0)
+  /// 过户费
+  transferFee    Decimal  @default(0)
+  /// 该笔卖出实现的盈亏
+  realizedPnl    Decimal  @default(0)
+  /// 成交时间
+  tradedAt       DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  stock   Stock   @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, tradedAt])
+  @@map("trades")
+}
+
+/// 每日资产快照 —— 收益曲线 / 最大回撤的数据基础
+model DailyAsset {
+  id            String   @id @default(cuid())
+  accountId     String
+  /// 快照日期
+  date          DateTime
+  /// 可用现金
+  cash          Decimal  @default(0)
+  /// 持仓市值
+  marketValue   Decimal  @default(0)
+  /// 总资产 = cash + marketValue
+  totalAsset    Decimal  @default(0)
+  /// 累计盈亏
+  totalPnl      Decimal  @default(0)
+  /// 日收益率
+  dailyReturn   Decimal  @default(0)
+  /// 累计收益率
+  totalReturn   Decimal  @default(0)
+  createdAt     DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, date])
+  @@index([accountId, date])
+  @@map("daily_assets")
+}
+
+/// 策略回测任务与结果
+///
+/// 定位：**独立于模拟交易系统**。回测是纯历史推演，不产生任何真实持仓，
+/// 因此 `accountId` 为**可空** —— 回测记录不隶属任何模拟账户，
+/// 也不会因账户重置/删除而消失（这与 Simulation 必须独占账户的语义刻意相反）。
+///
+/// 引擎：services/backtestEngine.ts（与 tradingEngine 共享 lib/tradingRules.ts
+/// 的费用/成本口径，但两个引擎互不 import）。
+model Backtest {
+  id            String   @id @default(cuid())
+  /// 可空：回测不隶属任何账户（与模拟交易系统解耦）
+  accountId     String?
+  name          String
+  /// 策略标识，如 MA_CROSS（第一批）/ RSI / BUY_HOLD
+  strategy      String
+  /// 策略参数 JSON 字符串，如 {"fast":5,"slow":20}
+  params        String   @default("{}")
+  /// 回测标的代码
+  symbol        String
+  /// 标的名（冗余，便于列表展示）
+  stockName     String?
+  /// 该股复权口径（回测必须与库内口径一致，不允许混用）
+  adjust        String   @default("qfq")
+  /// 用户请求的区间
+  startDate     DateTime
+  endDate       DateTime
+  /// 实际参与回测的首 / 末个交易日
+  firstBarDate  DateTime?
+  lastBarDate   DateTime?
+  /// 参与回测的日K根数
+  barCount      Int      @default(0)
+  /// 均线预热根数（前 warmupBars 根不产生信号，如实记录）
+  warmupBars    Int      @default(0)
+  /// 初始资金
+  initialCash   Decimal  @default(100000)
+  /// 最终资产
+  finalAsset    Decimal?
+  /// 总收益率 %
+  totalReturn   Decimal?
+  /// 年化收益率 %
+  annualReturn  Decimal?
+  /// 最大回撤 %（负值）
+  maxDrawdown   Decimal?
+  /// 年化波动率 %
+  volatility    Decimal?
+  /// 夏普比率
+  sharpeRatio   Decimal?
+  /// 胜率 %
+  winRate       Decimal?
+  /// 完成的交易次数（一买一卖计 1 次）
+  tradeCount    Int      @default(0)
+  winCount      Int      @default(0)
+  lossCount     Int      @default(0)
+  /// 平均盈利 / 平均亏损（负数）
+  avgWin        Decimal?
+  avgLoss       Decimal?
+  /// 盈亏比（总盈利 / |总亏损|），无亏损单时为 null
+  profitFactor  Decimal?
+  /// 赔率（平均盈利 / |平均亏损|）
+  payoffRatio   Decimal?
+  /// 累计手续费
+  totalFee      Decimal?
+  /// 参与计算的交易日数
+  tradingDays   Int      @default(0)
+  /// 买入持有基准收益率 %（同等费用口径）
+  benchmarkReturn Decimal?
+  /// 资金曲线 JSON [{date,close,cash,positionQty,marketValue,totalAsset,nav,returnPercent,dailyReturn}]
+  equityCurve   String?
+  /// 交易明细 JSON（仅成交笔）
+  tradeLog      String?
+  /// 回撤曲线 JSON [{date,totalAsset,peak,drawdownPercent}]
+  drawdownCurve String?
+  /// 买卖点 JSON [{date,type,price,quantity,signalDate,reason}]
+  markers       String?
+  /// 配对往返 JSON（用于胜率 / 平均盈亏 / 盈亏比）
+  roundTrips    String?
+  /// 逐笔事件日志 JSON（信号 + 成交 + 跳过，含现金/持仓/资产快照）
+  events        String?
+  /// 回测提示与警告 JSON（区间过短、预热占比高、未成交信号等）
+  warnings      String?
+  /// PENDING | SUCCESS | FAILED
+  status        String   @default("PENDING")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([symbol, createdAt])
+  @@map("backtests")
+}

@@ -1,0 +1,1019 @@
+# -*- coding: utf-8 -*-
+"""
+短线工作台 workbench_server.py
+本地HTTP服务：代理东财涨停池/腾讯指数行情，前端单页看实时水温与梯队
+用法：python workbench_server.py [port]   默认 8901
+"""
+import json, os, subprocess, time, glob, datetime, sys
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+CACHE = os.path.join(BASE, "zt_cache")
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+def curl_text(url, referer=None, retry=3, timeout=15):
+    for i in range(retry):
+        try:
+            cmd = ["curl", "-s", "--max-time", str(timeout), "-A", UA]
+            if referer:
+                cmd += ["-H", "Referer: " + referer]
+            cmd.append(url)
+            out = subprocess.run(cmd, capture_output=True, timeout=timeout + 5)
+            if out.returncode == 0 and out.stdout:
+                return out.stdout
+        except Exception:
+            pass
+        time.sleep(1.5 * (i + 1))
+    return b""
+
+def curl_json(url, referer=None):
+    raw = curl_text(url, referer)
+    try:
+        return json.loads(raw.decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+# ── 涨停池（本地K线筛 pool 优先, 东财实时兜底; 60s内存缓存）──
+_pool_mem = {}
+def read_local_pool(day):
+    """读本机每日落盘的 zt_cache/pool_{day}.json (由 build_local_pool 生成:
+    K线筛涨停主源 + 东财join质量字段). 无则 None. 用本地文件即0外网爬取."""
+    f = os.path.join(CACHE, "pool_%s.json" % day)
+    if not os.path.isfile(f):
+        return None
+    try:
+        d = json.load(open(f, encoding="utf-8"))
+        if isinstance(d, dict):
+            for k in d:
+                if isinstance(d[k], list):
+                    d = d[k]; break
+        return d or None
+    except Exception:
+        return None
+
+def fetch_pool(day):
+    """东财实时兜底(仅本地当日 pool 文件缺失时用). 返回 (pool, 实际数据日期)。
+    非交易日请求会返回最近交易日的池子, 需用 qdate 校正。"""
+    now = time.time()
+    ent = _pool_mem.get(day)
+    if ent and now - ent[0] < 60:
+        return ent[1], ent[2]
+    url = ("https://push2ex.eastmoney.com/getTopicZTPool?ut=7eea3edcaed734bea9cbfc24409ed989"
+           "&dpt=wz.ztzt&Pageindex=0&pagesize=1000&sort=fbt%%3Aasc&date=%s" % day)
+    d = curl_json(url) or {}
+    data = d.get("data") or {}
+    pool = data.get("pool") or []
+    qd = str(data.get("qdate") or day)
+    if pool:
+        _pool_mem[day] = (now, pool, qd)
+    return pool, qd
+
+def get_pool_local_first(day):
+    """单日取池: 本地 pool 文件优先(权威), 缺失才走东财实时兜底."""
+    loc = read_local_pool(day)
+    if loc is not None:
+        return loc, day
+    return fetch_pool(day)
+
+def latest_pool():
+    """从今天往前找最近有数据的交易日(本地K线pool优先), 返回 (实际日期, pool)"""
+    d0 = datetime.date.today()
+    for i in range(0, 8):
+        day = (d0 - datetime.timedelta(days=i)).strftime("%Y%m%d")
+        pool, qd = get_pool_local_first(day)
+        if pool:
+            actual = qd if qd < day else day  # 周末/盘前东财兜底会回退到最近交易日
+            return actual, pool
+    return None, []
+
+def prev_pool(day):
+    d0 = datetime.datetime.strptime(day, "%Y%m%d").date()
+    for i in range(1, 8):
+        d = (d0 - datetime.timedelta(days=i)).strftime("%Y%m%d")
+        pool, qd = get_pool_local_first(d)
+        if pool:
+            actual = qd if qd < d else d
+            if actual >= day:  # 防止周末请求回退成同一天
+                continue
+            return actual, pool
+    return None, []
+
+def adv_rate(prev, today):
+    plb = {s["c"]: int(s.get("lbc") or 0) for s in prev if int(s.get("lbc") or 0) >= 2}
+    if not plb:
+        return None, 0, 0
+    t = {s["c"]: int(s.get("lbc") or 0) for s in today}
+    adv = sum(1 for c in plb if c in t and t[c] > plb[c])
+    return adv / len(plb), adv, len(plb)
+
+# ═══ 广度情绪谱系温度档（2026-09-09 替换原 zt 温度档）═══
+# 旧口径只看"涨停家数 zt"(冰点<40/温吞40-120/过热>120)，与真实广度脱节
+# (例 20260720 zt=53温吞却跌停233家等权-1.5%，是真实恐慌日被漏判)。
+# 新口径=广度三维共振(等权/涨占/跌停) 判 6 态情绪，zt 只是"人气尖"。
+# 权威时序 = emotion_seq.json (build_emotion_seq.py 逐日产出)。
+# 出手价值(253天研究)：恐慌宣泄(次日64%反弹)=低吸窗、火热起头·续涨起点(次日100%)=跟单窗、
+#   混沌/阴跌/温和/见顶回落/孤立脉冲 = 休息不追。
+
+_emotion_cache = None  # emotion_seq.json 权威情绪时序缓存
+def load_emotion_seq():
+    """读 build_emotion_seq.py 产出的广度情绪时序(含每日 can_act/细分), 进程级缓存。"""
+    global _emotion_cache
+    if _emotion_cache is None:
+        fp = os.path.join(BASE, "emotion_seq.json")
+        try:
+            _emotion_cache = json.load(open(fp, encoding="utf-8"))
+        except Exception:
+            _emotion_cache = None
+    return _emotion_cache
+
+def emotion_for_day(rev_day):
+    """按复盘日取当日情绪态。精确命中优先；若 rev_day 当天尚无(盘中等)回退到最近已收盘交易日。
+    返回 dict 或 None。"""
+    seq = load_emotion_seq()
+    if not seq or not seq.get("rows"):
+        return None
+    rows = seq["rows"]
+    # 精确命中
+    for r in rows:
+        if r["day"] == rev_day:
+            return r
+    # 回退: 取 <= rev_day 的最近一行
+    pick = None
+    for r in rows:
+        if r["day"] < rev_day:
+            pick = r
+    return pick
+
+def next_trade_day(rev_day):
+    """决策目标日 = rev_day(情绪基准日) 的下一个真实交易日。
+    从 emotion_seq rows(严格升序的真实交易日序列) 取 rev_day 的后继行；
+    rev_day 已是序列末行(极端: 盘中/最新情绪日仍在校验)则按自然日+1 兜底并标注。
+    返回 dict {day, trade(次日Y/N), note}。"""
+    seq = load_emotion_seq()
+    if seq and seq.get("rows"):
+        rows = seq["rows"]
+        for i, r in enumerate(rows):
+            if r["day"] == rev_day and i + 1 < len(rows):
+                nxt = rows[i + 1]["day"]
+                return {"day": nxt, "from": rev_day, "note": "下一交易日"}
+        if rows and rev_day == rows[-1]["day"]:
+            # rev_day 就是时序最后一行: 尚无明日情绪(未收盘/未跑), 自然日+1 且明确"未知"
+            d = datetime.datetime.strptime(rev_day, "%Y%m%d").date()
+            d = d + datetime.timedelta(days=1)
+            return {"day": d.strftime("%Y%m%d"), "from": rev_day, "note": "预计下一交易日(次日行情未出,以当日情绪推演)"}
+    # rows 缺失: 自然日+1
+    d = datetime.datetime.strptime(rev_day, "%Y%m%d").date() + datetime.timedelta(days=1)
+    return {"day": d.strftime("%Y%m%d"), "from": rev_day, "note": "预计下一交易日(交易日历未知,以自然日推)"}
+
+# 情绪态 → 门禁(能动手/休息/可跟随) 单行渲染要用的话术
+EMO_GATE = {
+    "火热主升": {"cls": "fire",  "pos_key": "≤3成"},
+    "温和中性": {"cls": "mild",  "pos_key": "≤2成"},
+    "混沌分歧": {"cls": "chaos", "pos_key": "≤1成"},
+    "阴跌磨人": {"cls": "sulk",  "pos_key": "空仓"},
+    "恐慌宣泄": {"cls": "panic", "pos_key": "≤5成"},
+}
+
+def emotion_gate(erow):
+    """由 emotion_seq 一行产出工作台市场门禁 gate dict。
+    can_act(=gate.allow_buy) 直接决定 build_trade_decisions 给不给"可买"。"""
+    if not erow:
+        return {"state": "数据缺失", "mode": "先观望", "cap": "--", "confidence": "低",
+                "note": "情绪时序缺失，无法判定温度，先观望不追新仓。", "allow_buy": False,
+                "emotion": "未知", "act_word": "别动手"}
+    st = erow["state"]
+    can = bool(erow["can_act"])
+    gk = EMO_GATE.get(st, {})
+    cls = gk.get("cls", "")
+    # state 语义与旧 build_trade_decisions 兼容: "休息"=强制不买
+    if can:
+        state = "可出手" if st == "恐慌宣泄" else "可跟随"
+        mode = "低吸窗口" if st == "恐慌宣泄" else "跟单窗口"
+        cap = erow.get("pos") or gk.get("pos_key", "--")
+        confidence = "高"
+    else:
+        state = "休息"
+        mode = "观望"
+        cap = erow.get("pos") or "≤2成"
+        confidence = "高"
+    # 依据：用研究口径给一句证据
+    note = "%s档：涨停%d家 · 跌停%d · 涨占%.0f%% · 等权%+.2f。%s" % (
+        st, erow.get("zt", 0), erow.get("dt", 0),
+        erow.get("adv_pct", 0), erow.get("avg_chg", 0),
+        erow.get("act_tip", ""))
+    if erow.get("fire_sub"):
+        note = "%s(%s)：涨停%d家 · 跌停%d · 涨占%.0f%% · 等权%+.2f。%s" % (
+            st, erow["fire_sub"], erow.get("zt", 0), erow.get("dt", 0),
+            erow.get("adv_pct", 0), erow.get("avg_chg", 0),
+            erow.get("act_tip", ""))
+    return {
+        "state": state,          # 可出手/可跟随/休息
+        "mode": mode,
+        "cap": cap,
+        "confidence": confidence,
+        "sample": {},            # 历史样本由前端从决策带出, 门禁不再按 zt bucket 查
+        "note": note,
+        "level": st,             # 情绪态名(展示用)
+        "emotion": st,           # 同上, 冗余便于前端
+        "emoji": erow.get("emoji", ""),
+        "fire_sub": erow.get("fire_sub", ""),
+        "act_word": erow.get("act_word", ""),
+        "act_tip": erow.get("act_tip", ""),
+        "zt": erow.get("zt", 0),
+        "dt": erow.get("dt", 0),
+        "adv_pct": erow.get("adv_pct"),
+        "avg_chg": erow.get("avg_chg"),
+        "allow_buy": can,        # ← 决策逻辑唯一门禁
+        "erow_day": erow.get("day"),
+    }
+
+_MAIN_BOARD_PREFIX = ("60", "000", "001", "002")  # 沪主板 + 深主板(含原中小板)
+
+
+def tradable(s):
+    code = s["c"]
+    # 只保留主板可交易票：沪主板 60xxxx / 深主板 000·001·002xxxx。
+    # 双创(创业板 300/301、科创板 688/689)与北交所(8/4/92…)一律不可买，整条链路剔除。
+    if not code.startswith(_MAIN_BOARD_PREFIX):
+        return False
+    if "ST" in s.get("n", "").upper() or s.get("n", "").startswith("退"):
+        return False
+    if s.get("fbt", 999999) <= 93100 and s.get("hs", 99) < 1.5:
+        return False
+    return True
+
+def simp(s):
+    zttj = s.get("zttj") or {}
+    return {"c": s["c"], "n": s.get("n", ""), "lbc": int(s.get("lbc") or 0),
+            "hybk": s.get("hybk", ""), "hs": round(s.get("hs", 0), 1),
+            "ltsz": round((s.get("ltsz") or 0) / 1e8, 1),
+            "fund": round((s.get("fund") or 0) / 1e8, 2),
+            "fbt": s.get("fbt"),
+            "nm": ("%d天%d板" % (zttj.get("days", 0), zttj.get("ct", 0))) if zttj.get("days", 0) != zttj.get("ct", 0) else ""}
+
+MODEL_VERSION = "trade-gate-v1"
+RISK_NOTICE = "A股是T+1，买入当日无法普通止损；若次日低开、跌停或流动性受限，退出会受影响。以下结果只给交易优先级与风控边界，不保证收益。"
+
+
+def load_backtest():
+    fp = os.path.join(BASE, "backtest_t1_result.json")
+    try:
+        return json.load(open(fp, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def sector_meta(code, sw_map):
+    sec = sw_map.get(code) or {}
+    return sec.get("l1", ""), sec.get("l2", ""), sec.get("raw", "")
+
+
+# 旧 market_gate(按 zt bucket 冰点/过热才可买) 已废弃，由 emotion_gate(广度情绪态)取代。
+# 决策唯一门禁 = gate["allow_buy"] (=can_act)；休息态统一由 build_trade_decisions 强制不买。
+
+
+def score_candidate(s, hot, sw_map, gate):
+    """对候选打分。首板/二板走土壤接力分；3板以上高标走独立的高标分——
+    高位接力本质是博空间/情绪锚，板块共振对连板无区分度，改用：
+    高度(越高风险越大、折减)、缩量加速(资金锁筹=强)、X天Y板成色、
+    是否总龙头/情绪锚 来衡量。返回 score 与其分解备注。"""
+    lbc = int(s.get("lbc") or 0)
+    l1, l2, raw = sector_meta(s["c"], sw_map)
+    ltsz = (s.get("ltsz") or 0) / 1e8
+    hs = float(s.get("hs") or 0)
+    zttj = s.get("zttj") or {}
+    days = int(zttj.get("days") or 0)
+    ct = int(zttj.get("ct") or 0)
+    # 板块热度（仅首板/二板土壤逻辑有效；高标不靠它，故不给高标加分）
+    sec_boost = 0
+    for item in hot:
+        if item.get("name") in (l1, l2, raw):
+            sec_boost += int(item.get("n") or 0) * 3
+
+    if lbc >= 3:
+        # ---------- 高标专用打分 ----------
+        score = 0
+        reasons = []
+        # 1) 高度底座：每板给基础分，但越往上衰减——体现"越高位越危险"
+        base = {3: 26, 4: 30, 5: 32, 6: 33, 7: 32, 8: 30}.get(lbc, 26) - (lbc - 3) * 2
+        # 连板成色：X天Y板，若中途断过(days>ct)大幅扣分(反包弱于干净连板)
+        if ct >= 2 and days > ct:
+            base -= 10  # 断板反包：成色弱
+            reasons.append("反包")
+        score += base
+        # 2) 高度折减：8板以上视为极限高度，直接压低到不可参与
+        if lbc >= 8:
+            score -= 20
+            reasons.append("极限高度")
+        # 3) 缩量加速溢价：换手越低越像资金锁筹(强)；放量/烂板分歧则弱
+        if 0 < hs <= 4:
+            score += 12
+            reasons.append("缩量")
+        elif 4 < hs <= 8:
+            score += 8
+        elif 8 < hs <= 15:
+            score += 3
+        elif hs > 25:
+            score -= 12  # 天量分歧，高位见顶信号
+            reasons.append("天量")
+        # 4) 封板时间溢价：09:35前封(资金坚决)加分；尾盘偷板扣分
+        #    fbt 为 HHMMSS 整数，前导0会被吞(093047存成93047)，统一补0成6位解析
+        fbt = s.get("fbt") or 0
+        fh = 99
+        fm = 99
+        try:
+            if fbt:
+                f6 = str(int(fbt)).zfill(6)  # 93047 -> 093047
+                fh = int(f6[:2])
+                fm = int(f6[2:4])
+        except Exception:
+            fh, fm = 99, 99
+        if fh <= 9 and fh * 100 + fm <= 935:
+            score += 5
+            reasons.append("早封")
+        elif fh >= 14 or (fh == 13 and fm >= 30):
+            score -= 6
+            reasons.append("尾板")
+        # 5) 流通适中加分(好承接)，大盘股高位接力难
+        if ltsz <= 60:
+            score += 6
+        elif ltsz <= 120:
+            score += 4
+        elif ltsz > 250:
+            score -= 8
+            reasons.append("大盘")
+        # 6) 允许出手档(冰点/过热)才给足高位分；温吞档一律不给(禁手日高标同样危险)
+        if not gate["allow_buy"]:
+            score -= 8  # 温吞档压分，高位接力本不该出现在休息日
+            reasons.append("禁手")
+        return {
+            "score": score,
+            "l1": l1,
+            "l2": l2,
+            "raw_sector": raw,
+            "reasons": reasons,
+            "leader": True,
+        }
+
+    # ---------- 首板/二板土壤接力分(原逻辑) ----------
+    score = 0
+    if lbc == 1:
+        score += 18 if gate["allow_buy"] else 6
+    elif lbc == 2:
+        score += 16 if gate["allow_buy"] else 4
+    else:
+        score += 2
+    if ltsz <= 40:
+        score += 10
+    elif ltsz <= 80:
+        score += 7
+    elif ltsz <= 120:
+        score += 4
+    else:
+        score += 1
+    if 5 <= hs <= 18:
+        score += 8
+    elif 18 < hs <= 30:
+        score += 4
+    elif hs > 30:
+        score -= 4
+    if l1:
+        score += min(sec_boost, 12)
+    if lbc >= 2:
+        score += 4
+    return {
+        "score": score,
+        "l1": l1,
+        "l2": l2,
+        "raw_sector": raw,
+        "reasons": [],
+        "leader": False,
+    }
+
+
+def build_trade_decisions(cand, hot, sw_map, gate, bt):
+    # 情绪态门禁：allow_buy(=can_act) 是唯一给"可买"的门禁。
+    # 历史样本旧口径按 zt bucket 查，新口径情绪态研究(次日反弹率)在 emotion 卡展示，
+    # 决策卡不复用 per-bucket 笔样本(避免误导)，统一留空由前端显示情绪研究结论。
+    hist = {}
+    decisions = []
+    for s in cand:
+        meta = score_candidate(s, hot, sw_map, gate)
+        lbc = int(s.get("lbc") or 0)
+        ltsz = (s.get("ltsz") or 0) / 1e8
+        hs = float(s.get("hs") or 0)
+        is_leader = bool(meta.get("leader"))
+        reasons = meta.get("reasons") or []
+        action = "观察"
+        # 高标门槛：需要得分达标的缩量加速龙头，且天量分歧/反包/禁手一律不给
+        if is_leader:
+            leader_bad = ("天量" in reasons) or ("反包" in reasons) or ("极限高度" in reasons) or ("禁手" in reasons)
+            if gate["allow_buy"] and not leader_bad and meta["score"] >= 40 and hs < 15:
+                action = "可买"
+            elif gate["state"] == "休息":
+                action = "不买"
+            else:
+                action = "观察"
+            trigger = "次日竞价承接不破(不深低开)，开盘放量回封或分时强承接再跟"
+            abandon = "竞价无量/低开过深、盘中炸板不立即回封、板块整体退潮就放弃"
+            invalidate = "晋级失败断板、次日不能延续涨停即视为逻辑失效"
+            exit_plan = "博晋级；T+1 次日不封板/冲高回落必须离场，高位不隔夜恋战"
+            risk = "偏高" if lbc >= 5 else "中"
+            if lbc >= 6:
+                risk = "高"
+        else:
+            if gate["allow_buy"] and ((lbc == 1 and meta["score"] >= 28) or (lbc == 2 and meta["score"] >= 24)):
+                action = "可买"
+            elif gate["state"] == "休息":
+                action = "不买"
+            trigger = "竞价高开 3%~8%，开盘不破均价再跟"
+            abandon = "低开、炸板、板块不在热区或量能不承接就放弃"
+            invalidate = "跌破首封逻辑、回封失败或次日弱转强失败"
+            exit_plan = "T+1 次日冲高分批兑现；若低开过深优先处理流动性"
+            risk = "中"
+            if lbc == 2:
+                risk = "低-中"
+        if ltsz > 120:
+            risk = "偏高"
+        if not is_leader:
+            if hs < 5 or hs > 25:
+                risk = "偏高"
+        if gate["state"] == "休息":
+            risk = "高"
+        # 见顶回落(火热末端) 或 恐慌宣泄里的高位滞涨票：给"可买"前仍需防接最后一棒
+        # → 已在情绪态 can_act=False(休息) 层强制"不买"，此处无需重复收紧。
+        decisions.append({
+            "c": s["c"],
+            "n": s.get("n", ""),
+            "lbc": lbc,
+            "action": action,
+            "score": meta["score"],
+            "l1": meta["l1"],
+            "l2": meta["l2"],
+            "ltsz": round(ltsz, 1),
+            "hs": round(hs, 1),
+            "fbt": s.get("fbt"),
+            "risk": risk,
+            "trigger": trigger,
+            "abandon": abandon,
+            "invalidate": invalidate,
+            "exit": exit_plan,
+            "reason_tags": ",".join(reasons) if reasons else "",
+            "sample": hist,
+            "confidence": gate["confidence"] if action == "可买" else ("低" if gate["state"] == "休息" else "中"),
+            "leader_buy": bool(is_leader and action == "可买"),
+        })
+    decisions.sort(key=lambda x: (-1 if x["action"] == "可买" else 0, -x["score"], x["ltsz"], -x["lbc"]))
+    return decisions[:5]
+
+
+def api_pool():
+    day, pool = latest_pool()
+    if not pool:
+        return {"ok": False}
+    pday, ppool = prev_pool(day)
+    # 读池统一按权威 lbc_map 覆盖(有则覆盖、无则保持原值), 防东财字段口径/占位值失真
+    pool = overlay_lbc(pool, day)
+    if ppool:
+        ppool = overlay_lbc(ppool, pday)
+    adv, adv_n, plb_n = adv_rate(ppool, pool) if ppool else (None, 0, 0)
+    now = datetime.datetime.now()
+    after_close = (now.hour, now.minute) >= (15, 0)
+    today_str = now.strftime("%Y%m%d")
+    if day < today_str:
+        # 最新池属于过去的完整交易日（隔夜/周末/盘前请求被东财回退），直接用它复盘
+        rev_pool, rev_day = pool, day
+    elif after_close and pool:
+        rev_pool, rev_day = pool, day
+    elif ppool:
+        rev_pool, rev_day = ppool, pday
+    else:
+        rev_pool, rev_day = pool, day
+    # ═══ 广度情绪谱系门禁(2026-09-09 替换 zt 温度档) ═══
+    erow = emotion_for_day(rev_day)   # 复盘日当日(或最近)情绪态
+    gate = emotion_gate(erow)
+    gate["note"] = gate["note"] + (" 结论：{}。".format(
+        "出手窗：可直接筛选首板/二板/高位龙头" if gate["allow_buy"] else "非出手窗，先休息，不追新仓"))
+    cand = [s for s in pool if tradable(s)]
+    # 换手/流通门槛沿用情绪档宽松档(见顶回落等过热末端由 can_act 层直接休息)
+    tight = False
+    cap = 120e8
+    hs_lo = 3
+    first = [s for s in cand if int(s.get("lbc") or 0) == 1 and (s.get("ltsz") or 0) <= cap and hs_lo <= s.get("hs", 0) <= 30]
+    second = [s for s in cand if int(s.get("lbc") or 0) == 2 and (s.get("ltsz") or 0) <= 150e8]
+    leaders = [s for s in cand if int(s.get("lbc") or 0) >= 3 and (s.get("ltsz") or 0) <= 300e8]
+    ladder = sorted([s for s in cand if int(s.get("lbc") or 0) >= 2], key=lambda s: -int(s.get("lbc") or 0))
+    from collections import Counter
+    cnt = Counter(s.get("hybk", "?") for s in first + second)
+    hot = [{"name": k, "n": v} for k, v in cnt.most_common(8) if v >= 2]
+    sw_sectors = {"l1": [], "l2": []}
+    sw_map = {}
+    sw_path = os.path.join(BASE, "sw_sector.json")
+    if os.path.isfile(sw_path):
+        try:
+            sw_map = json.load(open(sw_path, encoding="utf-8"))
+            l1c, l2c = Counter(), Counter()
+            for s in rev_pool:
+                sec = sw_map.get(s["c"])
+                if sec:
+                    l1c[sec["l1"]] += 1
+                    l2c[sec["l2"]] += 1
+            sw_sectors["l1"] = [{"name": k, "n": v} for k, v in l1c.most_common(6)]
+            sw_sectors["l2"] = [{"name": k, "n": v} for k, v in l2c.most_common(8)]
+        except Exception:
+            sw_map = {}
+    bt = load_backtest()
+    decisions = build_trade_decisions(first + second + leaders, hot, sw_map, gate, bt)
+    best = decisions[0] if decisions else {}
+    # 决策目标日 = 情绪基准日(rev_day)的下一交易日: "能不能动手"语义是"基于 rev_day 收盘情绪, 看 trade_day 操作"
+    tday = next_trade_day(rev_day)
+    emotion = {
+        "state": gate.get("emotion") or (erow or {}).get("state") or "未知",
+        "name": (erow or {}).get("name", ""),
+        "emoji": (erow or {}).get("emoji", ""),
+        "fire_sub": (erow or {}).get("fire_sub", ""),
+        "adv_pct": (erow or {}).get("adv_pct"),
+        "avg_chg": (erow or {}).get("avg_chg"),
+        "dt": (erow or {}).get("dt", 0),
+        "zt": (erow or {}).get("zt", len(rev_pool)),
+        "can_act": gate.get("allow_buy", False),
+        "act_word": gate.get("act_word", ""),
+        "act_tip": gate.get("act_tip", ""),
+        "pos": gate.get("cap", ""),
+        "day": (erow or {}).get("day", rev_day),   # 情绪基准日(数据来源日)
+        "trade_day": tday["day"],                  # 决策目标日(判定针对那一天)
+        "trade_from": rev_day,                     # 决策基准来源日
+        "trade_note": tday["note"],
+    }
+    return {
+        "ok": True,
+        "model_version": MODEL_VERSION,
+        "risk_notice": RISK_NOTICE,
+        "day": day,
+        "pday": pday,
+        "rev_day": rev_day,
+        "trade_day": tday["day"],     # 决策目标日(见 emotion.trade_day)
+        "trade_from": rev_day,
+        "zt": len(rev_pool),
+        "lb": sum(1 for s in rev_pool if int(s.get("lbc") or 0) >= 2),
+        "mx": max((int(s.get("lbc") or 0) for s in rev_pool), default=0),
+        "adv": adv,
+        "adv_n": adv_n,
+        "plb_n": plb_n,
+        # ── 广度情绪谱系字段(前端新口径) ──
+        "emotion": emotion,
+        "level": emotion["state"],        # 顶层兼容: 情绪态名
+        "bucket": "",                     # zt bucket 已废弃, 置空防旧逻辑误用
+        "verdict": gate.get("state", ""), # 可出手/可跟随/休息
+        "tip": emotion.get("act_tip", ""),
+        "pos": emotion.get("pos", ""),
+        "reason": gate.get("note", ""),
+        "tight": tight,
+        "market_gate": gate,
+        "best": best,
+        "direct_decisions": decisions,
+        "ladder": [simp(s) for s in ladder],
+        "leaders": [simp(s) for s in sorted(leaders, key=lambda x: -int(x.get("lbc") or 0))],
+        "first": [simp(s) for s in sorted(first, key=lambda x: (x.get("ltsz") or 0))],
+        "second": [simp(s) for s in sorted(second, key=lambda x: (x.get("ltsz") or 0))],
+        "hot": hot,
+        "sw_sectors": sw_sectors,
+    }
+
+_cycle_seq_cache = None  # cycle_seq.json 权威时序缓存
+
+def load_cycle_seq():
+    """读取 derive_lbc_seq.py 产出的权威情绪时序(含每日 lbc_map), 结果进程级缓存。
+    该文件是连续板口径的唯一可信来源; 池文件自带 lbc 不可信(历史回补池常为 None/占位)。"""
+    global _cycle_seq_cache
+    if _cycle_seq_cache is None:
+        fp = os.path.join(BASE, "cycle_seq.json")
+        try:
+            _cycle_seq_cache = json.load(open(fp, encoding="utf-8"))
+        except Exception:
+            _cycle_seq_cache = []
+    return _cycle_seq_cache
+
+def overlay_lbc(pool, day):
+    """读池时按权威 lbc_map 覆盖每只票的 lbc(记忆红线: 读pool必须用lbc_map覆盖)。
+    覆盖不到(非 cycle_seq 区间/缺日)则保留原值, 保证实时当日(东财在岸)不倒退。"""
+    auth = {r["day"]: (r.get("lbc_map") or {}) for r in load_cycle_seq()}.get(day)
+    if not auth:
+        return pool
+    for s in pool:
+        if isinstance(s, dict) and s.get("c") in auth:
+            s["lbc"] = auth[s["c"]]
+    return pool
+
+def api_daily():
+    """情绪周期日报。优先读 emotion_seq.json (广度情绪态权威时序, 含 state/can_act/fire_sub)，
+    让前端能按每日情绪态着色 + 标注"能不能动手"；缺失则退回 cycle_seq.json 的涨停家数序列。
+    兼容旧逻辑作兜底(仅当权威文件都缺失)。"""
+    es = load_emotion_seq()
+    if es and es.get("rows"):
+        rows = [{
+            "day": r["day"], "zt": r.get("zt", 0), "lb": r.get("lb", 0),
+            "mx": r.get("mx", 0), "adv": r.get("adv"),
+            "state": r.get("state", ""), "can_act": bool(r.get("can_act")),
+            "fire_sub": r.get("fire_sub", ""),
+            "dt": r.get("dt", 0), "avg_chg": r.get("avg_chg"),
+        } for r in es["rows"]]
+        return {"ok": True, "rows": rows[-30:], "src": "emotion_seq"}
+    seq = load_cycle_seq()
+    if seq:
+        # 去掉大字段, 只保留趋势用到的轻量字段
+        rows = [{"day": r["day"], "zt": r.get("zt", 0), "lb": r.get("lb", 0),
+                 "mx": r.get("mx", 0), "adv": r.get("adv")} for r in seq]
+        return {"ok": True, "rows": rows[-30:], "src": "cycle_seq"}
+    # ── 兜底: 权威文件缺失时才重读池文件并注入 lbc_map ──
+    out = []
+    files = sorted(glob.glob(os.path.join(CACHE, "pool_*.json")))
+    days, pools = [], {}
+    for f in files:
+        day = os.path.basename(f)[5:13]
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except Exception:
+            continue
+        if d:
+            days.append(day)
+            pools[day] = d
+    for i, day in enumerate(days):
+        pool = overlay_lbc(pools[day], day)  # 兜底路径也必须走 lbc_map 覆盖
+        lb = sum(1 for s in pool if int(s.get("lbc") or 0) >= 2)
+        mx = max((int(s.get("lbc") or 0) for s in pool), default=0)
+        adv = None
+        if i > 0:
+            a, _, _ = adv_rate(overlay_lbc(pools[days[i - 1]], days[i - 1]), pool)
+            adv = round(a * 100, 1) if a is not None else None
+        out.append({"day": day, "zt": len(pool), "lb": lb, "mx": mx, "adv": adv})
+    return {"ok": True, "rows": out[-30:], "src": "pool_fallback"}
+
+def api_index():
+    raw = curl_text("https://qt.gtimg.cn/q=sh000001,sz399001,sz399006,sh000688")
+    txt = raw.decode("gbk", "ignore")
+    res = []
+    for line in txt.split(";"):
+        if "=" not in line or "~" not in line:
+            continue
+        body = line.split("=", 1)[1].strip().strip('"')
+        f = body.split("~")
+        if len(f) < 40:
+            continue
+        try:
+            res.append({"name": f[1], "price": float(f[3]), "chg": float(f[31]), "pct": float(f[32]),
+                        "vol": float(f[6]), "amt": round(float(f[37]) / 10000, 1)})
+        except Exception:
+            continue
+    return {"ok": True, "list": res, "ts": datetime.datetime.now().strftime("%H:%M:%S")}
+
+_yaowang_mem = {}  # 妖王雷达进程级缓存: {day: (ts, data)}
+def api_yaowang():
+    """妖王生命周期预警(雷达v1.1)。合并 连板梯队现役高位票 的 风险/机会/观察 + 昨日崩盘核对。
+    优先读当日已生成的 yaowang_radar_{day}.json; 无则调 run_radar 现跑(慢, 会落盘)。
+    结果进程级缓存约5分钟, 避免首页每60s自动刷新重复重算。"""
+    import yaowang_radar as yr
+    # 定位"最近已收盘交易日"的复盘日
+    now = datetime.datetime.now()
+    day_key = now.strftime("%Y%m%d")
+    # 先读磁盘上最新的一份 radar json (可能是过去交易日), 与复盘日对齐
+    files = sorted(glob.glob(os.path.join(BASE, "yaowang_radar_20*.json")))
+    latest_file = files[-1] if files else None
+    radar_day = None
+    if latest_file:
+        try:
+            radar_day = os.path.basename(latest_file)[14:22]  # yaowang_radar_YYYYMMDD.json
+        except Exception:
+            radar_day = None
+    # 缓存命中(同一复盘日且<300s)
+    ent = _yaowang_mem.get(radar_day) if radar_day else None
+    if ent and time.time() - ent[0] < 300:
+        return ent[1]
+    # 读 json
+    data = None
+    if latest_file:
+        try:
+            with open(latest_file, encoding="utf-8") as f:
+                data = json.load(f)
+            # 兼容旧 flat-list 结构 → 包一层
+            if isinstance(data, list):
+                risk = [x for x in data if x.get("level") == "风险"]
+                obs = [x for x in data if x.get("level") == "观察"]
+                opp = [x for x in data if x.get("level") == "机会"]
+                data = {"ok": True, "day": radar_day, "tiers": {"opportunity": opp, "watch": obs, "risk": risk},
+                        "crash_confirm": None, "summary": [], "n_cand": len(data)}
+        except Exception:
+            data = None
+    # 若磁盘 json 不是今天收盘后的 → 现跑一次生成最新 (只在盘后且磁盘陈旧时; 防止盘中狂跑)
+    need_run = False
+    if data is None:
+        need_run = True
+    else:
+        try:
+            dj = data.get("day") or radar_day
+            gen = data.get("generated_at") or ""
+            gen_hhmm = gen[11:16] if len(gen) >= 16 else ""
+            # 磁盘档案若早于今天 15:00, 且现在已过收盘 → 需重算今日
+            if dj != day_key and now.hour >= 15:
+                need_run = True
+            elif dj == day_key and now.hour >= 15 and gen_hhmm and gen_hhmm < "15:00":
+                need_run = True
+        except Exception:
+            pass
+    if need_run:
+        try:
+            res = yr.run_radar(day_key, verbose=False)
+            if res and res.get("ok"):
+                data = res
+                radar_day = res.get("day")
+        except Exception as e:
+            data = data or {"ok": False, "err": str(e)}
+    if not data:
+        return {"ok": False, "err": "no radar data"}
+    # 字段归一: 雷达项用 code, 前端契约用 c —— 统一补 c(兼容新旧磁盘结构)
+    for _tier in ("risk", "watch", "opportunity"):
+        for _r in (data.get("tiers") or {}).get(_tier) or []:
+            if _r.get("c") is None and _r.get("code"):
+                _r["c"] = _r["code"]
+    # top_risk 也补 c(供前端高亮入口用)
+    _tr = data.get("top_risk") or {}
+    if _tr and _tr.get("c") is None and _tr.get("code"):
+        _tr["c"] = _tr["code"]
+    if radar_day:
+        _yaowang_mem[radar_day] = (time.time(), data)
+    return data
+
+
+def api_mindmaps():
+    """扫描 output 目录下的思维导图图片：每日梯队 + 其他专题"""
+    daily, others = [], []
+    for f in glob.glob(os.path.join(BASE, "*.png")):
+        name = os.path.basename(f)
+        mt = datetime.datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
+        if name.startswith("连板梯队思维导图-"):
+            tag = name.replace("连板梯队思维导图-", "").replace(".png", "")
+            daily.append({"file": name, "tag": tag, "mtime": mt})
+        elif ("思维导图" in name or "对照图" in name) and name != "workbench_preview.png":
+            daily.append({"file": name, "tag": name.replace(".png", ""), "mtime": mt})
+    daily.sort(key=lambda x: -os.path.getmtime(os.path.join(BASE, x["file"])))
+    return {"ok": True, "list": daily}
+
+# ── 全市场前复权日K浏览器(手机可查) ──
+KLINE_DIR = os.path.join(BASE, "full_market_qfq")
+_stock_index = None  # main_board_list.json 索引缓存
+
+def load_stock_index():
+    """全市场主板清单索引(用于搜索), 进程级缓存。结构 [{code,name,market}]"""
+    global _stock_index
+    if _stock_index is None:
+        try:
+            d = json.load(open(os.path.join(BASE, "main_board_list.json"), encoding="utf-8"))
+            _stock_index = d.get("stocks") or []
+        except Exception:
+            _stock_index = []
+    return _stock_index
+
+def api_kline_stocks(q=""):
+    """股票搜索: 按 代码前缀 或 名称子串 过滤, 最多返回 80 条, 供手机端下拉选择。"""
+    idx = load_stock_index()
+    q = (q or "").strip().lower()
+    if not q:
+        # 无关键词→返回最近更新的一批(便于直接浏览), 不做全量倒回
+        return {"ok": True, "list": idx[:100], "total": len(idx), "q": q}
+    hit = []
+    for s in idx:
+        code = str(s.get("code", ""))
+        name = s.get("name", "")
+        if code.startswith(q) or q in code or q in name.lower():
+            hit.append(s)
+            if len(hit) >= 80:
+                break
+    return {"ok": True, "list": hit, "total": len(idx), "q": q}
+
+def api_kline(code):
+    """读取单只前复权日K。返回 {name, code, rows:[{d,o,c,h,l,v}]}"""
+    code = str(code or "").strip()
+    if not code or not code.isdigit() or len(code) != 6:
+        return {"ok": False, "err": "bad code"}
+    fp = os.path.join(KLINE_DIR, "k_%s.json" % code)
+    if not os.path.isfile(fp):
+        return {"ok": False, "err": "no kline for " + code}
+    try:
+        d = json.load(open(fp, encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "err": str(e)}
+    rows = d.get("rows") or []
+    if not rows:
+        return {"ok": False, "err": "empty rows"}
+    return {"ok": True, "code": code, "name": d.get("name", ""),
+            "rows": rows,
+            "last_d": rows[-1].get("d"), "last_c": rows[-1].get("c"),
+            "n": len(rows)}
+
+def api_kline_meta():
+    """整库统计: 本地K线文件数/体积、末日分布、最新末日。确认数据在、何时更新。"""
+    nf = 0
+    last_ds = {}
+    total_bytes = 0
+    try:
+        if os.path.isdir(KLINE_DIR):
+            for fn in os.listdir(KLINE_DIR):
+                if fn.startswith("k_") and fn.endswith(".json"):
+                    nf += 1
+                    fp = os.path.join(KLINE_DIR, fn)
+                    try:
+                        total_bytes += os.path.getsize(fp)
+                        d = json.load(open(fp, encoding="utf-8"))
+                        rows = d.get("rows") or []
+                        if rows:
+                            ld = rows[-1].get("d")
+                            last_ds[ld] = last_ds.get(ld, 0) + 1
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    # 末日分布取最多5组
+    top = sorted(last_ds.items(), key=lambda x: -int(x[0]))[:5]
+    return {"ok": True, "count": nf,
+            "size_mb": round(total_bytes / 1048576, 1),
+            "latest_days": [{"day": k, "n": v} for k, v in top],
+            "latest_day": top[0][0] if top else None}
+
+def api_kline_ver():
+    return int(os.path.getmtime(os.path.join(BASE, "kline.html"))) if os.path.isfile(os.path.join(BASE, "kline.html")) else 0
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, obj, ctype="application/json; charset=utf-8", no_cache=False):
+        body = obj.encode("utf-8") if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if no_cache:
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        try:
+            if u.path == "/" or u.path == "/index.html":
+                self._send(open(os.path.join(BASE, "workbench.html"), encoding="utf-8").read(),
+                           "text/html; charset=utf-8", no_cache=True)
+            elif u.path == "/mindmap":
+                self._send(open(os.path.join(BASE, "mindmap.html"), encoding="utf-8").read(),
+                           "text/html; charset=utf-8", no_cache=True)
+            elif u.path == "/report":
+                fp = os.path.join(BASE, "连板接力全量回测报告.html")
+                if not os.path.isfile(fp):
+                    self.send_error(404, "report not generated, run gen_full_report.py"); return
+                self._send(open(fp, encoding="utf-8").read(),
+                           "text/html; charset=utf-8")
+            elif u.path == "/kline":
+                fp = os.path.join(BASE, "kline.html")
+                if not os.path.isfile(fp):
+                    self.send_error(404, "kline page missing"); return
+                self._send(open(fp, encoding="utf-8").read(),
+                           "text/html; charset=utf-8", no_cache=True)
+            elif u.path.startswith("/img/"):
+                name = u.path[5:]
+                if "/" in name or ".." in name:
+                    self.send_error(403); return
+                from urllib.parse import unquote
+                fp = os.path.join(BASE, unquote(name))
+                if not os.path.isfile(fp) or not fp.lower().endswith((".png", ".svg", ".jpg")):
+                    self.send_error(404); return
+                ctype = "image/png" if fp.lower().endswith(".png") else (
+                    "image/svg+xml" if fp.lower().endswith(".svg") else "image/jpeg")
+                body = open(fp, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "max-age=300")
+                self.end_headers()
+                self.wfile.write(body)
+            elif u.path.startswith("/static/"):
+                name = u.path[8:]
+                if "/" in name or ".." in name:
+                    self.send_error(403); return
+                fp = os.path.join(BASE, "static", name)
+                if not os.path.isfile(fp):
+                    self.send_error(404); return
+                ctype = "application/javascript" if fp.endswith(".js") else "application/octet-stream"
+                body = open(fp, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "max-age=86400")
+                self.end_headers()
+                self.wfile.write(body)
+            elif u.path == "/api/pool":
+                self._send(api_pool())
+            elif u.path == "/api/daily":
+                self._send(api_daily())
+            elif u.path == "/api/index":
+                self._send(api_index())
+            elif u.path == "/api/mindmaps":
+                self._send(api_mindmaps())
+            elif u.path == "/api/ver":
+                # 返回页面文件版本戳，供前端检测到更新时自动整页重载
+                ver = {}
+                for key, fn in [("main", "workbench.html"), ("mindmap", "mindmap.html"),
+                                ("report", "连板接力全量回测报告.html"),
+                                ("kline", "kline.html")]:
+                    fp = os.path.join(BASE, fn)
+                    ver[key] = int(os.path.getmtime(fp)) if os.path.isfile(fp) else 0
+                self._send(ver, no_cache=True)
+            elif u.path == "/api/kline_stocks":
+                p = parse_qs(u.query)
+                self._send(api_kline_stocks((p.get("q") or [""])[0]))
+            elif u.path == "/api/kline":
+                p = parse_qs(u.query)
+                self._send(api_kline((p.get("code") or [""])[0]))
+            elif u.path == "/api/kline_meta":
+                self._send(api_kline_meta())
+            elif u.path == "/api/yaowang":
+                self._send(api_yaowang())
+            elif u.path == "/app" or u.path.startswith("/app/"):
+                self._proxy_to_nextjs(u)
+            else:
+                self.send_error(404)
+        except Exception as e:
+            self._send({"ok": False, "err": str(e)})
+
+    def _proxy_to_nextjs(self, u):
+        """把 /app/* 反向代理到本机 Next.js（127.0.0.1:8080）。"""
+        import http.client
+        from urllib.parse import unquote
+        # 去掉 /app 前缀，映射到后端路径
+        rest = u.path[4:] or "/"
+        if not rest.startswith("/"):
+            rest = "/" + rest
+        backend_path = rest + (("?" + u.query) if u.query else "")
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        headers = {}
+        for k, v in self.headers.items():
+            lk = k.lower()
+            if lk in ("host", "connection", "accept-encoding", "content-length"):
+                continue
+            headers[k] = v
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=60)
+            conn.request(self.command, backend_path, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                lk = k.lower()
+                if lk in ("connection", "transfer-encoding", "content-encoding", "content-length"):
+                    continue
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            conn.close()
+        except Exception as e:
+            self.send_error(502, "nextjs upstream error: %s" % e)
+
+
+    # ---- 非 GET 动词：仅 /app/* 前缀转发到 Next.js，其余维持 404 ----
+    def do_POST(self):
+        u = urlparse(self.path)
+        if u.path == "/app" or u.path.startswith("/app/"):
+            return self._proxy_to_nextjs(u)
+        return self.send_error(404)
+
+    def do_PUT(self):
+        u = urlparse(self.path)
+        if u.path == "/app" or u.path.startswith("/app/"):
+            return self._proxy_to_nextjs(u)
+        return self.send_error(404)
+
+    def do_PATCH(self):
+        u = urlparse(self.path)
+        if u.path == "/app" or u.path.startswith("/app/"):
+            return self._proxy_to_nextjs(u)
+        return self.send_error(404)
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        if u.path == "/app" or u.path.startswith("/app/"):
+            return self._proxy_to_nextjs(u)
+        return self.send_error(404)
+
+    def do_HEAD(self):
+        u = urlparse(self.path)
+        if u.path == "/app" or u.path.startswith("/app/"):
+            return self._proxy_to_nextjs(u)
+        return self.send_error(404)
+
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8901
+    print("workbench on http://0.0.0.0:%d (局域网手机也可访问)" % port)
+    ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
