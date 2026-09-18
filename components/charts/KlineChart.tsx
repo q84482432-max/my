@@ -12,6 +12,8 @@ interface KlineChartProps {
   height?: number;
   /** 是否显示成交量副图 */
   showVolume?: boolean;
+  /** 均线周期集合（可选，默认 MA5/10/20/60；如 [5, 20]） */
+  maPeriods?: number[];
   loading?: boolean;
   /** 买卖点标记（回测用，可选） */
   markers?: KlineMarkerInput[];
@@ -44,14 +46,15 @@ export default function KlineChart({
   bars,
   height = 460,
   showVolume = true,
+  maPeriods,
   loading = false,
   markers,
   zoomStart,
   zoomEnd,
 }: KlineChartProps) {
   const option = React.useMemo(
-    () => buildKlineOption({ bars, showVolume, markers, zoomStart, zoomEnd }),
-    [bars, showVolume, markers, zoomStart, zoomEnd],
+    () => buildKlineOption({ bars, showVolume, maPeriods, markers, zoomStart, zoomEnd }),
+    [bars, showVolume, maPeriods, markers, zoomStart, zoomEnd],
   );
 
   if (!loading && bars.length === 0) {

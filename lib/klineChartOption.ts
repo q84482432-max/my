@@ -11,7 +11,7 @@
 
 import type { EChartsOption } from "echarts";
 import type { KlineBar } from "@/types";
-import { MA_CONFIG, calcMAs } from "@/lib/indicators";
+import { MA_CONFIG, MA_PALETTE, calcMAs } from "@/lib/indicators";
 import { formatVolume } from "@/lib/utils";
 
 /** A股涨跌色（与 globals.css 的 --stock-up / --stock-down 一致） */
@@ -37,6 +37,11 @@ export interface BuildKlineOptionInput {
   bars: KlineBar[];
   /** 是否显示成交量副图（默认 true） */
   showVolume?: boolean;
+  /**
+   * 均线周期集合（可选）。不传时使用默认 MA_CONFIG（MA5/10/20/60）；
+   * 传入则按给定周期绘制均线（如 [5, 20]）。
+   */
+  maPeriods?: number[];
   /** dataZoom 初始窗口起点百分比（默认 55，即默认显示最近 45%） */
   zoomStart?: number;
   /** dataZoom 初始窗口终点百分比（默认 100） */
@@ -62,6 +67,7 @@ export interface BuildKlineOptionInput {
 export function buildKlineOption({
   bars,
   showVolume = true,
+  maPeriods,
   zoomStart = 55,
   zoomEnd = 100,
   markers = [],
@@ -69,7 +75,13 @@ export function buildKlineOption({
   const dates = bars.map((b) => b.date);
   // ECharts candlestick 数据顺序：[open, close, low, high]
   const candle = bars.map((b) => [b.open, b.close, b.low, b.high]);
-  const maSeries = calcMAs(bars);
+
+  // 均线周期：未传则沿用默认 MA_CONFIG；传入则按给定周期生成配置（取色走调色板）。
+  const maConfigs =
+    maPeriods && maPeriods.length > 0
+      ? maPeriods.map((n, i) => ({ n, color: MA_PALETTE[i % MA_PALETTE.length] }))
+      : MA_CONFIG;
+  const maSeries = calcMAs(bars, maConfigs);
 
   // 买卖点按日期索引，供 tooltip 按 dataIndex 直接取用（不按日期反查，避免重复日期错位）
   const dateIndex = new Map<string, number>();
@@ -109,7 +121,7 @@ export function buildKlineOption({
     },
   }));
 
-  const legendData = ["K线", ...MA_CONFIG.map((c) => `MA${c.n}`)];
+  const legendData = ["K线", ...maConfigs.map((c) => `MA${c.n}`)];
   const xAxisIndex = showVolume ? [0, 1] : [0];
 
   return {

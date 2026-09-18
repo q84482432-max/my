@@ -25,6 +25,7 @@
     "test:backtest": "tsx scripts/testBacktest.ts",
     "test:api": "tsx scripts/testApiRoutes.ts",
     "test:simTrade": "tsx scripts/testSimTrade.ts",
+    "test:simTradeUI": "node -e \"require('./runner.mjs').run('scripts/testSimTradeUI.ts')\"",
     "test:concurrency": "tsx scripts/testConcurrency.ts",
     "browser:shot": "tsx scripts/browserVerify.ts shot",
     "browser": "tsx scripts/browserVerify.ts",
