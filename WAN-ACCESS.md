@@ -36,12 +36,15 @@
 | 回测页 | `http://111.229.225.7/app/backtest` |
 | 浏览器进服务器终端 | `http://111.229.225.7/`（腾讯云 OrcaTerm 工作台，手机也能开） |
 
-### ⚠️ 站点当前是新是旧？
+### ✅ 线上版本：2026-09-19 01:52 已部署新版 UI
 
-**线上 `/app` 跑的是 2026-09-18 的构建产物，界面不是最新版。**
-判定依据：线上 HTML 标题仍是旧版 `模拟炒股 · 猜股票`，且不含新版的 `今日开盘` / `仓位` / `加仓` 等元素（实测出现次数均为 0）。
+线上 `/app` 现已运行**新版界面**（五层信息层级 / 白底 / 移动端固定操作区）。
 
-新版 UI 源码**已入库并已同步到服务器 git 仓库**（`components/SimTradeClient.tsx` 含「今日开盘」3 处、「加仓」5 处），但**尚未构建部署**。要线上看到新版，需要走「本地构建 standalone → 上传 → 重启服务」，且上传时必须**排除 `prisma/dev.db`**，否则线上 237.9 万根 K 线与会话数据会被本地库覆盖。
+**判定版本的可靠方法**（别用 HTML 文案判断，会误判）：
+页面 `app/simtrade/page-*.js` 这个 chunk 内含新版独有文案 `今日开盘` / `加仓` / `确认今日操作`，旧版没有这些词。
+> 为什么不能用 HTML 判断：SimTradeClient 是客户端组件，SSR 阶段没有会话数据，这些文案在 HTML 里本来就不会出现 —— 用 HTML 检索会得出「还是旧版」的错误结论。必须查 chunk。
+
+部署后的实测（2026-09-19 01:52）：`/`、`/simtrade`、`/backtest`、`/stocks` 全部 200；`/api/simtrade` 200；`/api/market` 200（5558 只 / 2,379,962 根 K 线）。
 
 ---
 
@@ -137,4 +140,53 @@ git config core.sshCommand "ssh -i ~/.ssh/ashare_deploy"
 /home/ubuntu/ashare-src-20260919.tar.gz      # 最新源码包 357KB（MD5 见服务器端 md5sum）
 /home/ubuntu/ashare-src-20260918.tar.gz      # 上一版源码包 339KB
 磁盘：40G 总 / 13G 已用 / 26G 可用（33%）
+/home/ubuntu/prisma-tool                     # 独立的 prisma CLI（部署时 generate 用）
+```
+
+---
+
+## 六、部署新版 UI 的完整流程
+
+### 本地三件事
+
+```bash
+# 1) 构建（先停掉占着 .next 的 dev server，否则文件被锁）
+npm run build
+
+# 2) 组装并打包（自动复制 .next/static、剔除 dev.db 与 .env）
+bash deploy/pack-standalone.sh
+
+# 3) 上传包与服务器端脚本
+python deploy/remote.py put .tmp-run/ashare-standalone.tar.gz /home/ubuntu/ashare-standalone.tar.gz
+python deploy/remote.py put deploy/deploy-inplace.sh /home/ubuntu/deploy-inplace.sh
+```
+
+### 服务器一件事
+
+```bash
+python deploy/remote.py exec "bash /home/ubuntu/deploy-inplace.sh"
+```
+
+脚本会自动：备份 → 同步 `.next`/`server.js` → **重新 prisma generate** → 重启服务 → 健康检查 → 比对生产库指纹（size/mtime/md5 三项必须一致）。
+
+### ⚠️ 两个必须知道的坑（2026-09-19 实际踩过并修复）
+
+1. **不要在服务器上同步 `node_modules`。**
+   standalone 的 `node_modules` 是精简集（仅 19 个包），且本机（Windows）构建的 Prisma Client 只含 **windows 引擎**。用 `rsync --delete` 同步会同时导致两个后果：
+   - 删掉线上独有的 `prisma` CLI 目录；
+   - 引入平台不匹配的 Prisma Client，所有走数据库的接口立刻 **500**，报错：
+     `Prisma Client could not locate the Query Engine for runtime "debian-openssl-3.0.x"`
+   正确做法：**默认不同步 node_modules**（依赖没变时复用线上那份），并在部署后**务必重新 `prisma generate`** 生成 Linux 引擎。
+   `deploy-inplace.sh` 已内置这两条规避。
+
+2. **`prisma generate` 必须在服务器上跑。** Linux 引擎缓存在 `~/.cache/prisma/master/<hash>/debian-openssl-3.0.x`，服务器上已有，generate 时秒级完成、无需联网下载。
+   `prisma` CLI 装在 `/home/ubuntu/prisma-tool`（独立目录，不污染 app 的 node_modules）。
+
+### 回滚
+
+```bash
+cd /home/ubuntu/app
+mv .next .next.broken && mv .next.pre-deploy-<时间戳> .next
+mv server.js server.js.broken && mv server.js.pre-deploy-<时间戳> server.js
+sudo systemctl restart ashare.service
 ```
