@@ -1,6 +1,19 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+/* ============================================================================
+   Table · 组件规范依据 DESIGN.md §4.4 / §5.4 / §8.1
+   ----------------------------------------------------------------------------
+   关键改动：表头加底色（--surface-subtle）。原实现表头只有
+   text-muted-foreground 而无底色，"表头"与"表体"在视觉上无法区分 ——
+   这是"整片纯白"的第二处根因。补上底色后，5558 行长列表才有扫描锚点。
+
+   两条硬约束：
+   1. 单元格一律 nowrap，宽表横向滚动而非折行（数字列给足宽度，永不截断）
+   2. 任何断点都不把表格改为卡片堆叠 —— 行情数据的可比性依赖列对齐，
+      堆叠会破坏"同一字段纵向对比"这一核心用法
+   ==========================================================================*/
+
 const Table = React.forwardRef<
   HTMLTableElement,
   React.HTMLAttributes<HTMLTableElement>
@@ -8,7 +21,7 @@ const Table = React.forwardRef<
   <div className="relative w-full overflow-auto">
     <table
       ref={ref}
-      className={cn("w-full caption-bottom text-sm", className)}
+      className={cn("w-full caption-bottom text-body", className)}
       {...props}
     />
   </div>
@@ -42,7 +55,10 @@ const TableRow = React.forwardRef<
   <tr
     ref={ref}
     className={cn(
-      "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+      /* 行分隔线用更浅的冷灰 #EEF2F8，降低长列表的网格噪点；
+         行悬停用 #F6F9FD 而非 --accent(#EEF3FF) —— 后者过重，
+         长列表快速滚动时会"闪"。 */
+      "border-b border-[#eef2f8] transition-colors hover:bg-[#f6f9fd] data-[state=selected]:bg-muted",
       className,
     )}
     {...props}
@@ -57,7 +73,7 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-10 px-3 text-left align-middle font-medium text-muted-foreground whitespace-nowrap",
+      "h-9 whitespace-nowrap bg-muted px-3 text-left align-middle text-label font-semibold text-t3",
       className,
     )}
     {...props}
@@ -71,7 +87,7 @@ const TableCell = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <td
     ref={ref}
-    className={cn("px-3 py-2.5 align-middle whitespace-nowrap", className)}
+    className={cn("whitespace-nowrap px-3 py-2.5 align-middle", className)}
     {...props}
   />
 ));
@@ -83,7 +99,7 @@ const TableCaption = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <caption
     ref={ref}
-    className={cn("mt-4 text-sm text-muted-foreground", className)}
+    className={cn("mt-4 text-body text-muted-foreground", className)}
     {...props}
   />
 ));

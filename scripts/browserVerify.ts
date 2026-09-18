@@ -47,7 +47,10 @@ function env(): NodeJS.ProcessEnv {
   };
 }
 
-function run(args: string[]): string {
+function run(
+  args: string[],
+  opts: { timeout?: number; tolerateTimeout?: boolean } = {},
+): string {
   // 直接调 CLI 的 JS 入口（package.json bin = ./bin/agent-browser.js）。
   // 不用 .cmd 包装器：Windows 上 execFileSync spawn .cmd 会 EINVAL，
   // 经 cmd.exe /c 转发又要处理路径空格转义，最稳的就是 node <js>。
@@ -60,12 +63,28 @@ function run(args: string[]): string {
 
   process.stderr.write(`[browserVerify] agent-browser ${args.join(' ')}\n`);
 
-  return execFileSync(process.execPath, [js, ...args], {
-    env: env(),
-    encoding: 'utf8',
-    timeout: 60_000, // 60s 上限：CLI 各命令实际都在秒级，超时说明真的异常
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  try {
+    return execFileSync(process.execPath, [js, ...args], {
+      env: env(),
+      encoding: 'utf8',
+      timeout: opts.timeout ?? 60_000, // 60s 上限：CLI 各命令实际都在秒级，超时说明真的异常
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    // agent-browser 是 daemon 架构：冷启动的 `open` 在完成导航、打印
+    // "✓ <页面标题>" 之后进程仍然挂着（实测挂到 242s），必然触发 spawnSync 超时。
+    // 所以不能把超时一律当失败 —— 判据是 stdout 里已经出现 "✓"，即导航已完成。
+    const err = e as { code?: string; stdout?: string };
+    if (
+      opts.tolerateTimeout &&
+      err.code === 'ETIMEDOUT' &&
+      /✓/.test(err.stdout || '')
+    ) {
+      process.stderr.write('[browserVerify] open 未退出但导航成功（daemon 架构），继续\n');
+      return err.stdout || '';
+    }
+    throw e;
+  }
 }
 
 /** 截图并归档（agent-browser 落盘路径不受控，需读目录找最新文件） */
@@ -98,7 +117,11 @@ function safeListShots(): string[] {
 
 /** 打开回测页（可选先选中标的） */
 function openBacktest(code?: string): void {
-  run(['open', `${BASE_URL}/backtest`]);
+  // open 走「容忍超时」：daemon 冷启动时完成导航也不退出，stdout 含 ✓ 即算成功
+  run(['open', `${BASE_URL}/backtest`], {
+    tolerateTimeout: true,
+    timeout: 120_000,
+  });
   if (!code) return;
 
   // 等历史列表/搜索框就绪

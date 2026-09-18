@@ -2,76 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================================
+   A股模拟交易 · 设计令牌与基础层
+   规范来源：deploy/ui-design/DESIGN.md（§2 色彩 / §3 字体 / §4 组件 /
+             §6 层次 / §8 响应式）
+   ----------------------------------------------------------------------------
+   【本次修正的核心】
+   原 :root 中 --background / --card / --popover 三者同为纯白（0 0% 100%），
+   导致「页面底」与「卡片面」同色 —— 层级完全塌陷，这是"整片纯白"的根因。
+   现把表面拆成四层（画布 → 内容面 → 分区面 → 下沉面），
+   层级首先由色差表达，投影只作辅助（§6.1）。
+
+   【语义方向不变】
+   涨红跌绿为 A 股硬语义，不因"好看"而反转（§7.3）。
+   ==========================================================================*/
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
-
-    --card: 0 0% 100%;
+    /* ── 表面层级（§6.1）L0 画布 → L1 内容面 → L2 分区面 → L3 下沉面 ── */
+    --canvas: #f3f6fa; /* L0 页面底（原与卡片同为 #FFFFFF） */
+    --background: 214 41% 97%; /* #F3F6FA —— 与 --canvas 同源 */
+    --card: 0 0% 100%; /* L1 卡片 / 表格容器 */
     --card-foreground: 222 47% 11%;
-
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
-
-    --primary: 221 83% 53%;
-    --primary-foreground: 210 40% 98%;
-
-    --secondary: 210 40% 96%;
+    --secondary: 216 45% 98%; /* L2 分区面 */
     --secondary-foreground: 222 47% 11%;
-
-    --muted: 210 40% 96%;
+    --muted: 216 45% 98%; /* 同 L2：表头、卡内分区底 */
     --muted-foreground: 215 16% 47%;
+    --surface-subtle: #f7f9fc; /* L2 显式别名 */
+    --surface-sunken: #edf1f7; /* L3 分段控件槽、估算框 */
 
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
+    /* ── 文字（§2.1，对比度均为 WCAG 2.1 实测值）── */
+    --foreground: 222 47% 11%; /* #0F172A · 17.85:1 AAA */
+    --t1: #0f172a;
+    --t2: #475569; /* 7.58:1 AAA · 次级说明、表体 */
+    --t3: #64748b; /* 4.76:1 AA  · 表头、单位、时间戳 */
+
+    /* ── 边框 ── */
+    --border: 217 30% 92%; /* #E3E8F0 常规分隔线 */
+    --border-strong: #d3dbe7; /* 输入框、可点击边界（1.43:1） */
+    --input: 216 29% 87%;
+
+    /* ── 品牌蓝（§2.1：向企业蓝收敛，只做"注意力锚点"）── */
+    --primary: 225 81% 52%; /* #2154E8 · 6.00:1 AA */
+    --primary-foreground: 0 0% 100%;
+    --accent: 222 100% 97%; /* #EEF3FF 选中行 / 浅底区块 */
+    --accent-foreground: 225 77% 44%;
+    --ring: 225 90% 60%; /* #3B6BF5 聚焦环（非文本 ≥3:1） */
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 221 83% 53%;
+    /* ── 行情语义（§2.2：本次唯一的可用性硬伤修正）──
+       原 --stock-down #1EAE53 于白底仅 2.96:1，低于 AA 正文要求 4.5，
+       而绿色在本产品中大量用于 12–13.5px 的跌幅数字，属小字号正文。
+       修法是把「文本级」与「图形级」拆成两组变量：
+         · 文本/按钮 → 加深，双场景（白底 / 浅底）均达标
+         · K线/图例 → 保持较亮，满足图形元素 ≥3:1
+       红侧同理（原 #EB1414 置于涨浅底上仅 3.86，不达标）。 */
+    --stock-up: 0 75% 45%; /* #C91D1D · 白底 5.71:1 · 涨幅文字、买入 */
+    --stock-down: 142 72% 29%; /* #157F3C · 白底 5.08:1 · 跌幅文字、卖出 */
+    --stock-flat: 215 16% 47%; /* #64748B 平盘 0.00% */
+    --up-graphic: #d93a3a; /* K线 / 图例 · 4.55:1 */
+    --dn-graphic: #18a05c; /* K线 / 图例 · 3.38:1（图形元素 ≥3:1 即可） */
+    --up-bg: #fdeded; /* 涨幅 chip 底（文字于其上 5.03:1） */
+    --dn-bg: #eaf7f0; /* 跌幅 chip 底（文字于其上 4.61:1） */
 
-    --radius: 0.5rem;
-
-    /* A股涨跌色：涨红跌绿（中国习惯） */
-    --stock-up: 0 84% 50%;
-    --stock-down: 142 71% 40%;
-    --stock-flat: 215 16% 47%;
+    /* ── 圆角与投影（§6.2）──
+       圆角提到 12px 后投影同步收敛：大圆角 + 重投影是廉价感的常见来源。 */
+    --radius: 0.75rem;
+    --sh1: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+    --sh2: 0 6px 18px rgba(16, 24, 40, 0.09);
+    --sh3: 0 16px 40px rgba(16, 24, 40, 0.16);
   }
 
+  /* 深色模式当前无切换入口（§7.4 待决事项 1），此处补齐令牌以保证
+     将来启用时不会出现 --canvas / --surface-sunken 缺值。 */
   .dark {
+    --canvas: #0b1220;
     --background: 222 47% 8%;
-    --foreground: 210 40% 96%;
-
     --card: 222 47% 11%;
     --card-foreground: 210 40% 96%;
-
     --popover: 222 47% 11%;
     --popover-foreground: 210 40% 96%;
-
-    --primary: 217 91% 60%;
-    --primary-foreground: 222 47% 11%;
-
+    --foreground: 210 40% 96%;
+    --t1: #e2e8f0;
+    --t2: #b6c2d4;
+    --t3: #94a3b8;
     --secondary: 217 33% 17%;
     --secondary-foreground: 210 40% 96%;
-
     --muted: 217 33% 17%;
     --muted-foreground: 215 20% 65%;
-
+    --surface-subtle: #16202f;
+    --surface-sunken: #101927;
+    --border: 217 33% 20%;
+    --border-strong: #2a3a52;
+    --input: 217 33% 20%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
     --accent: 217 33% 17%;
     --accent-foreground: 210 40% 96%;
-
+    --ring: 217 91% 60%;
     --destructive: 0 63% 50%;
     --destructive-foreground: 210 40% 98%;
-
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
-    --ring: 217 91% 60%;
-
     --stock-up: 0 84% 60%;
     --stock-down: 142 65% 45%;
     --stock-flat: 215 20% 65%;
+    --up-graphic: #f26b6b;
+    --dn-graphic: #35c07c;
+    --up-bg: #2a1618;
+    --dn-bg: #10251b;
   }
 }
 
@@ -79,13 +120,105 @@
   * {
     @apply border-border;
   }
+
+  html {
+    /* §3.1 系统字体栈 —— 不引入 Web 字体：中文 Web 字体体积大、首屏代价高，
+       而系统栈在 Windows / macOS 均有高质量中文。无授权费用。 */
+    font-family:
+      -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-background text-foreground;
+    /* §3.2 正文 / 表格 13.5px，行高 1.6；字距一律 0
+       （中文负字距会挤压笔画导致粘连，§7.3 列为禁止模式） */
+    font-size: 13.5px;
+    line-height: 1.6;
+    letter-spacing: 0;
     font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* §3.1 等宽数字：默认比例数字在不同数值间字宽不一致，
+     会让行情表格的数字列左右跳动，在 5558 行长列表中尤其明显。
+     这不是可选项 —— 所有价格 / 涨跌幅 / 金额 / 统计数值容器都要覆盖。 */
+  th,
+  td,
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* §8.2 键盘可达性：全部可交互元素 Tab 可达且焦点可见 */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  /* §8.3 动效：全站仅 150ms 颜色过渡，尊重系统减弱动效设置。
+     不做入场动画 / 数字滚动 / 图表生长 —— 盯盘场景下这类动效是干扰。 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
   }
 }
 
-/* 数字等宽显示，避免行情跳动 */
-.tabular {
-  font-variant-numeric: tabular-nums;
+@layer components {
+  /* §5.5 空态：三个要素缺一不可 —— 图标 + 说明文字 + 主操作按钮。
+     只写"暂无数据"而不告诉用户如何产生数据，是空态最常见的失败。 */
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 34px 20px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 12px;
+    background: linear-gradient(180deg, #fbfdff, #f4f8fd);
+    color: var(--t2);
+    font-size: 13.5px;
+  }
+
+  /* §4.5 涨跌 chip：涨跌必须带符号（+ / -），符号 + 颜色是冗余编码，
+     仅靠颜色区分涨跌对有红绿色觉障碍的用户不可用。 */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+  .chip-up {
+    color: hsl(var(--stock-up));
+    background: var(--up-bg);
+    border: 1px solid #f3c9c9;
+  }
+  .chip-dn {
+    color: hsl(var(--stock-down));
+    background: var(--dn-bg);
+    border: 1px solid #c4e7d5;
+  }
+  .chip-flat {
+    color: var(--t3);
+    background: var(--surface-subtle);
+    border: 1px solid hsl(var(--border));
+  }
+}
+
+@layer utilities {
+  /* 兼容旧调用点：源码中已存在 .tabular，统一到等宽数字语义 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
 }

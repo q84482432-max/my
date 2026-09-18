@@ -53,3 +53,6 @@ yarn-error.log*
 # ── python
 __pycache__/
 *.pyc
+
+# ── WorkBuddy 工作目录（会话记忆 / 验证截图等运行产物，不入库）
+/.workbuddy/

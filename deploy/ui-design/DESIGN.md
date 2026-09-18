@@ -10,6 +10,17 @@
 - 图表以 `echarts-for-react@^3.0.6` 渲染（个股详情 K 线已确认），本规范给出的是颜色与尺寸约束，非 ECharts 配置迁移
 - Tailwind 配置中 `borderColor`/`backgroundColor` 均绑定到 CSS 变量（由 DOM 类名 `border-stock-up/30`、`bg-stock-up/10` 存在推得，说明 `stock-up` 已在 Tailwind theme 中注册）
 
+**落地状态（2026-09-19 更新）**：
+- ✅ 源码已 git 化，本规范 §2 令牌 / §4 组件 / §5 栅格 / §6 层次 / §8 响应式**已落地源码**：
+  `app/globals.css`（令牌 + 基础层）、`tailwind.config.ts`（语义色 / 字号阶梯 / 投影 / zIndex）、
+  `components/ui/{table,card,button}.tsx`、`components/SiteNav.tsx`（替代 nav-active.js 注入）、`app/layout.tsx`（深色顶栏）
+- ✅ §7.1 最大回撤起始日 Bug 已修复：改为复用 `lib/performanceMetrics.ts::calcMaxDrawdown`，
+  `test:backtest` 134 项通过（线上曾是直接改构建产物的热修，现已回写源码）
+- ✅ 已出真实渲染截图 4 张（`.workbuddy/screenshots/`）：行情中心 / 模拟账户 / 个股详情 / 策略回测
+- ⏳ 待办：§8.4 骨架屏（现为居中"加载中"文字）、§5.4 表头 sticky、§8.1 各断点实机核对、色觉障碍模拟
+- ⚠️ 下方"已核实的环境事实"记录于 2026-09-18，其中**"服务器上没有源码"已不再成立**
+  （源码副本 `/home/ubuntu/src/a-share-sim-trading`，裸仓库 `/home/ubuntu/repos/a-share-sim-trading.git`）
+
 **已核实的环境事实**（本次实测，非推断）：
 - 线上 `/home/ubuntu/app/` **只有** 构建产物（`.next/`）、`server.js`（Next 自动生成的 standalone 入口）、`prisma/schema.prisma` 与 `dev.db` —— **没有任何 `app/`、`components/`、`lib/`、`scripts/` 源码目录**
 - 全站样式只有 **一份** 构建产物 CSS：`/home/ubuntu/app/.next/static/css/1f03992f2f77f6cc.css`（23,424 bytes）
