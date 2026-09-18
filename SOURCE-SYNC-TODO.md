@@ -76,6 +76,8 @@
   由 `git archive` 导出（124 文件，339KB），包 MD5 `c6417a752458d8ab9c93f523f25de4ea` 双向校验一致；
   未含 `node_modules`/`.next`/`dev.db`/`.env`/`deploy/remote.py`；附 `README-SERVER-COPY.md` 说明与运行目录的关系
 - 临时排查脚本已清理
+- **服务器裸仓库已建**：`/home/ubuntu/repos/a-share-sim-trading.git`（524 KB，含完整提交历史）——
+  异地/网吧取代码的三条路径见 `WAN-ACCESS.md`（**不需要自建 Gitea/GitLab**）
 
 ---
 
