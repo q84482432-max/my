@@ -1,0 +1,19 @@
+[Unit]
+Description=A-share Shortline Workbench (短线工作台)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ubuntu/workbench
+ExecStart=/usr/bin/python3 /home/ubuntu/workbench/workbench_server.py 80
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 关键：确保云端 curl 不经过任何代理
+Environment=no_proxy=*
+Environment=NO_PROXY=*
+
+[Install]
+WantedBy=multi-user.target

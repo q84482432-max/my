@@ -1,0 +1,20 @@
+[Unit]
+Description=A股日K行情增量更新（个股+指数：腾讯主源 / 新浪备源 + 自动复权重建）
+Documentation=file:/home/ubuntu/MARKET-DATA-OPS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/market-daily-update.py --workers 12 --n 45
+# 指数日更：紧跟个股更新之后执行。
+# 注意 Type=oneshot 的语义 —— 若上面那条个股更新失败，本条不会执行；17:30 的补跑会重试。
+# 指数只写 market_indices / index_klines，与个股的 stocks / klines 完全隔离。
+ExecStart=/usr/bin/python3 /home/ubuntu/index-daily-update.py --n 60
+StandardOutput=append:/home/ubuntu/logs/market-update.log
+StandardError=append:/home/ubuntu/logs/market-update.log
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=1800

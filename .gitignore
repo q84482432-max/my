@@ -14,6 +14,10 @@ next-env.d.ts
 # database (SQLite 开发库不入库)
 /prisma/*.db
 /prisma/*.db-journal
+# SQLite 运行时旁写文件与数据库压缩副本 —— 生产库 807MB，绝不能入库
+/prisma/*.db.gz
+/prisma/*.db-wal
+/prisma/*.db-shm
 /prisma/migrations/dev.db*
 
 # misc

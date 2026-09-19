@@ -1,0 +1,22 @@
+[Unit]
+Description=A-Share Sim Trading (Next.js standalone)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/app
+Environment=NODE_ENV=production
+Environment=PORT=8080
+Environment=HOSTNAME=0.0.0.0
+Environment=DATABASE_URL=file:./dev.db
+Environment=NODE_OPTIONS=--max-old-space-size=768
+ExecStart=/opt/node/bin/node /home/ubuntu/app/server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ubuntu/app/app.log
+StandardError=append:/home/ubuntu/app/app.log
+
+[Install]
+WantedBy=multi-user.target
