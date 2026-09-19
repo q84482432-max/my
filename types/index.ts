@@ -104,6 +104,56 @@ export interface StockQuote extends StockInfo {
 }
 
 /**
+ * 指数分类。
+ *
+ * 刻意不复用 BoardType —— 指数不存在「主板 / 创业板」这种个股板块概念，
+ * 把两者塞进同一个联合类型会让「board=GEM 的指数」这种无意义状态变得合法。
+ */
+export type IndexCategory = "综合指数" | "规模指数" | "板块指数";
+
+/**
+ * 指数元信息 DTO。
+ *
+ * 注意 `code` 一律带交易所前缀（sh000001），而非裸 6 位数字：
+ * 裸码在 A 股会与个股大面积撞车（上证指数 000001 vs 平安银行 000001），
+ * 这是指数必须独立建表、独立取数路径的根本原因。
+ */
+export interface IndexInfo {
+  id: string;
+  /** 带交易所前缀的代码：sh000001 / sz399001 / bj899050 */
+  code: string;
+  name: string;
+  exchange: Exchange;
+  category: IndexCategory;
+  /** 数据来源：sina | tencent */
+  source: string;
+  /** K 线根数 */
+  barCount: number;
+  /** 数据窗口起始日 YYYY-MM-DD */
+  windowStart: string | null;
+  /** 数据窗口结束日 YYYY-MM-DD */
+  windowEnd: string | null;
+}
+
+/**
+ * 指数日K DTO。
+ *
+ * 与 KlineBar 的两点差异：
+ *  - 无 `amount`：指数不披露成交额，只能取到成交量，凭空推导会造假数据；
+ *  - 成交量单位固定为「股」，且**不含复权概念**（指数没有除权除息）。
+ */
+export interface IndexBar {
+  /** 交易日 YYYY-MM-DD */
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** 成交量（股） */
+  volume: number;
+}
+
+/**
  * 账户汇总 DTO（虚拟账户对外字段）
  *
  * 字段说明：

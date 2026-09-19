@@ -453,3 +453,82 @@ model Backtest {
   @@index([symbol, createdAt])
   @@map("backtests")
 }
+
+// ============================================================================
+// 指数数据（与个股**物理分表**，用于保持个股口径纯净）
+// ----------------------------------------------------------------------------
+// 为什么不塞进 stocks / klines：
+//
+// 1. **代码冲突无法解决**。stocks.code 是唯一索引且不带交易所后缀，
+//    而 A 股指数与个股大量撞码：
+//        000001  上证指数(SH)  vs  平安银行(SZ)
+//        000905  中证500       vs  厦门港务
+//        000016  上证50        vs  *ST康佳A
+//        000688  科创50        vs  国城矿业
+//    入同一张表就必须改 code 口径或加后缀，会波及全部既有取数路径。
+//
+// 2. **会污染个股统计口径**。listCodesHavingKlines() / getMarketStats() 等
+//    是全表扫描个股的，指数混入会直接改变：
+//      · 「股票数」5558 → 5567
+//      · 「数据窗口」2024-11-04 → 2006-03-01（指数历史长得多）
+//      · 行情中心的成交活跃 / 涨幅榜 / 跌幅榜 会把指数排进个股榜单
+//      · 模拟炒股「随机选股」有概率抽到指数
+//    靠加 where 条件排除是「约定式隔离」，任一处漏改就回归；分表是「结构式隔离」，
+//    现有查询物理上不可能读到指数。
+//
+// 3. **复权口径语义不同**。指数没有除权除息，不存在 qfq/hfq 概念，
+//    klines.adjust 这个必填字段对指数无意义，硬塞只能用 'none' 占位，语义被污染。
+//
+// 代价：指数需要独立的读取路径（services/indexDataService.ts）。
+// 这是刻意的——让「读指数」这件事显式化，而不是混在 getKlines 里靠 code 猜。
+// ============================================================================
+
+/// 指数元信息
+model MarketIndex {
+  id       String @id @default(cuid())
+  /// 代码，**必须带交易所前缀**以避开与个股撞码：sh000001 / sz399001 / bj899050
+  code     String @unique
+  /// 名称，如 上证指数
+  name     String
+  /// 交易所：SH / SZ / BJ
+  exchange String
+  /// 分类：综合指数 / 规模指数 / 板块指数
+  category String @default("综合指数")
+  /// 数据来源：sina | tencent
+  source   String @default("sina")
+  /// K 线根数（冗余，便于完整性校验）
+  barCount Int    @default(0)
+  /// 数据窗口起止（冗余，便于区间校验）
+  windowStart DateTime?
+  windowEnd   DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  klines IndexKline[]
+
+  @@index([name])
+  @@index([exchange])
+  @@map("market_indices")
+}
+
+/// 指数日K。独立于 klines —— 无 period / adjust 字段，因为指数只有日线且无复权概念。
+model IndexKline {
+  id        String   @id @default(cuid())
+  indexId   String
+  /// 交易日（收盘日期）。SQLite 下与 klines 一致，实际按毫秒时间戳存储
+  tradeDate DateTime
+  open      Decimal
+  high      Decimal
+  low       Decimal
+  close     Decimal
+  /// 成交量（股）。注意与 klines 的一致性：本表统一按「股」存储，
+  /// 新浪源原生为股，腾讯源为手，导入层负责换算后再落库。
+  volume    BigInt   @default(0)
+  createdAt DateTime @default(now())
+
+  index MarketIndex @relation(fields: [indexId], references: [id], onDelete: Cascade)
+
+  @@unique([indexId, tradeDate])
+  @@index([tradeDate])
+  @@map("index_klines")
+}

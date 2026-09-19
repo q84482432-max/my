@@ -27,9 +27,10 @@
     "test:simTrade": "tsx scripts/testSimTrade.ts",
     "test:simTradeUI": "node -e \"require('./runner.mjs').run('scripts/testSimTradeUI.ts')\"",
     "test:concurrency": "tsx scripts/testConcurrency.ts",
+    "test:index": "tsx scripts/testIndexIsolation.ts",
     "browser:shot": "tsx scripts/browserVerify.ts shot",
     "browser": "tsx scripts/browserVerify.ts",
-    "test:all": "npm run test:market && npm run test:kline && npm run test:indicators && npm run test:chart && npm run test:trade && npm run test:account && npm run test:sim && npm run test:backtest && npm run test:simTrade && npm run test:concurrency"
+    "test:all": "npm run test:market && npm run test:kline && npm run test:indicators && npm run test:chart && npm run test:trade && npm run test:account && npm run test:sim && npm run test:backtest && npm run test:simTrade && npm run test:concurrency && npm run test:index"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
