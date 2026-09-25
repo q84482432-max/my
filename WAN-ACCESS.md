@@ -33,6 +33,7 @@
 | 用途 | 地址 |
 |---|---|
 | 站点首页 | `http://111.229.225.7/app` |
+| **指数页（9 个主要指数）** | `http://111.229.225.7/app/indices` |
 | 回测页 | `http://111.229.225.7/app/backtest` |
 | 浏览器进服务器终端 | `http://111.229.225.7/`（腾讯云 OrcaTerm 工作台，手机也能开） |
 
@@ -181,6 +182,26 @@ python deploy/remote.py exec "bash /home/ubuntu/deploy-inplace.sh"
 
 2. **`prisma generate` 必须在服务器上跑。** Linux 引擎缓存在 `~/.cache/prisma/master/<hash>/debian-openssl-3.0.x`，服务器上已有，generate 时秒级完成、无需联网下载。
    `prisma` CLI 装在 `/home/ubuntu/prisma-tool`（独立目录，不污染 app 的 node_modules）。
+
+### ⚠️ 坑 3（2026-09-20 升 Next 16 时新踩，务必记住）
+
+**① 换 schema 时必须手动同步 `prisma/schema.prisma`。**
+`deploy-inplace.sh` 只同步 `.next` 与 `server.js`，**不碰 `prisma/` 目录**（为保护 770MB 生产库）。
+所以新增数据模型后，线上 schema 会是旧的，重新 generate 出来的 client 缺模型，表现为
+`TypeError: Cannot read properties of undefined (reading 'findMany')` —— 只影响新功能页面。
+修法（本次实测有效）：`remote.py put prisma/schema.prisma /home/ubuntu/app/prisma/schema.prisma`
+→ 服务器上 `prisma generate` → 重启。**只需 generate，不要 `db push`**（表已存在时没必要动生产库）。
+可复用脚本：`deploy/fix-server-schema.sh`（先备份旧 schema，前后打印 dev.db md5 作证）。
+
+**② Turbopack 的哈希别名在 Windows 构建下会丢链（Next 16 特有）。**
+Next 16 起 `serverExternalPackages` 不再 require `@prisma/client`，而是 require
+`@prisma/client-<hash>`，对应 `.next/node_modules/@prisma/client-<hash>` → 软链到 `node_modules/@prisma/client`。
+**Windows 上构建 standalone 时这个软链只留下一个空目录**（实测 `symlink=false`、0 文件），
+上传到 Linux 后别名解析失败：
+`Error: Failed to load external module @prisma/client-<hash>: Cannot find module ...`
+典型症状：**`/` 与所有走数据库的接口 500，而 `/simtrade`、`/backtest` 却 200**。
+修法：把空别名目录重建为指向真实包的软链（脚本 `deploy/fix-turbopack-alias.sh`），
+`deploy-inplace.sh` 的 `[4b/7]` 步骤已内置该修复，后续部署自动处理。
 
 ### 回滚
 

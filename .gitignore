@@ -24,12 +24,14 @@ next-env.d.ts
 .DS_Store
 *.pem
 
-# debug
+# debug / 日志（*.log 全量忽略，运行日志与排查产物一律不入库）
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
 # env
+.env
 .env*.local
 
 # typescript
@@ -60,3 +62,19 @@ __pycache__/
 
 # ── WorkBuddy 工作目录（会话记忆 / 验证截图等运行产物，不入库）
 /.workbuddy/
+
+# ── 一次性排查脚本与中间产物（审计/验证过程产生，不入库）
+# `_` 前缀的临时脚本（python / node 探针、数据比对、故障复现等）
+/_*.py
+/_*.js
+/_*.mjs
+/_*.ts
+/_*.txt
+# 临时目录（阶段验证输出、抓包、合成库等）
+/.tmp-*/
+# 进程输出重定向与探针产物
+*.err
+*.out
+/probe.txt
+# 本次仓库初始化扫描的临时文件
+/.scan-untracked.txt

@@ -40,7 +40,7 @@ export default async function StockDetailPage({ params, searchParams }: PageProp
   ]);
 
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-6">
+    <div className="mx-auto w-full max-w-[1320px] px-4 py-6">
       <nav className="mb-4 text-sm text-muted-foreground">
         <Link href="/" className="hover:text-foreground">
           行情中心

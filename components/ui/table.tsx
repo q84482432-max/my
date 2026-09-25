@@ -55,10 +55,12 @@ const TableRow = React.forwardRef<
   <tr
     ref={ref}
     className={cn(
-      /* 行分隔线用更浅的冷灰 #EEF2F8，降低长列表的网格噪点；
-         行悬停用 #F6F9FD 而非 --accent(#EEF3FF) —— 后者过重，
-         长列表快速滚动时会"闪"。 */
-      "border-b border-[#eef2f8] transition-colors hover:bg-[#f6f9fd] data-[state=selected]:bg-muted",
+      /* 行分隔线用最弱的分隔色，降低长列表的网格噪点；
+         行悬停用 L2 分区面而非 --accent —— 后者过重，
+         长列表快速滚动时会"闪"。
+         注意：原为写死的浅色 `#eef2f8` / `#f6f9fd`，全站转深色后会变成
+         「深底上的浅色横线」与「浅底行」两种穿帮，故改用令牌。 */
+      "border-b border-border transition-colors hover:bg-surface-subtle data-[state=selected]:bg-muted",
       className,
     )}
     {...props}

@@ -22,9 +22,11 @@ const buttonVariants = cva(
         default: "bg-primary text-primary-foreground hover:bg-[#1a44c4]",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        /* 次级按钮：白底 + 强调边框，悬停转下沉面并加深边框（§4.6 .btn-o） */
+        /* 次级按钮：内容面底 + 强调边框，悬停转下沉面并加深边框（§4.6 .btn-o）
+           注意：原为写死的 `bg-white` —— 全站转深色后会变成一块刺眼白按钮。
+           改用 `bg-card` 令牌，随主题自动深浅。 */
         outline:
-          "border border-border-strong bg-white text-t1 hover:border-[#bfc9d9] hover:bg-surface-subtle",
+          "border border-border-strong bg-card text-t1 hover:border-border-strong hover:bg-surface-subtle",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",

@@ -45,6 +45,32 @@ export interface KlineBar {
   volume: number;
   /** 成交额（元） */
   amount: number;
+  /**
+   * 30 分钟 K 的**收盘时刻** `HH:MM:SS`（仅 30m 数据有值）。
+   *
+   * 日K / 周K / 月K 一律不带该字段（保持 `undefined`），因此新增本字段
+   * **不影响任何既有调用方**（向后兼容）。
+   *
+   * 为什么放在 KlineBar 而不是另立一个结构：30m 棒的其余七个字段与日K 完全同构，
+   * 统一后它可以被既有的图表 / 指标 / 序列化代码直接消费，不必维护并行 DTO。
+   */
+  time?: string;
+}
+
+/**
+ * 30 分钟 K 线（DTO）。
+ *
+ * 与 `KlineBar` 是**同一套 DTO**，只是把 `time` 从可选收窄为必需：
+ *  - 30m 棒可以直接传给任何接受 `KlineBar` 的函数（复用图表/指标）；
+ *  - 30m 专属逻辑里可以安全地依赖 `time` 一定存在。
+ *
+ * 历史上这是 `lib/intraday30m.ts` 内部另立的一个 interface，八个字段与
+ * `KlineBar` 完全重复（2026-09-22 审计发现）；现统一到此处，
+ * `lib/intraday30m.ts` 仅做 re-export 以保持既有 import 路径不变。
+ */
+export interface IntradayBar extends KlineBar {
+  /** 该 30 分钟 K 的收盘时刻 HH:MM:SS */
+  time: string;
 }
 
 /** 股票基础信息 DTO */
@@ -97,6 +123,16 @@ export interface StockQuote extends StockInfo {
   volume: number;
   /** 最新成交额（元）—— 由 close × volume 推导（源数据无 amount 字段） */
   amount: number;
+  /**
+   * 最新交易日的 开 / 高 / 低。
+   *
+   * 与 `lastPrice`（= 同一根日K 的 close）**同源**，因此四者口径天然一致。
+   * 供个股页头部的「开/高/低」行情块展示（对标同花顺等行情软件）。
+   * 无K线数据时为 0。
+   */
+  open: number;
+  high: number;
+  low: number;
   /** 上一交易日收盘价（用于涨跌幅校验） */
   prevClose: number;
   /** 最新交易日 */
@@ -434,6 +470,166 @@ export interface SimulationQuote {
 export type SimTradeStatus = "ACTIVE" | "FINISHED";
 
 /**
+ * V2 交易阶段（服务端唯一权威，客户端不可干预）。
+ *
+ * 每个交易日拆成「开盘阶段 + 收盘阶段」两个**独立交易阶段**，每阶段只能完成 1 次操作：
+ *  - `OPEN`            开盘阶段 —— 按**当日开盘价**成交
+ *  - `OPEN_CONFIRMED`  开盘阶段已完成 1 次有效操作，等待进入收盘
+ *  - `CLOSE_ANIMATION` 收盘动画播放中（服务端已揭示当日收盘价，前端仅做展示）
+ *  - `CLOSE`           收盘阶段 —— 按**当日收盘价**成交
+ *  - `CLOSE_CONFIRMED` 收盘阶段已完成 1 次有效操作，等待当日结算
+ *  - `DAY_SETTLED`     当日结算完成，可进入下一交易日
+ */
+export type SimTradeStage =
+  | "OPEN"
+  | "OPEN_CONFIRMED"
+  | "CLOSE_ANIMATION"
+  | "CLOSE"
+  | "CLOSE_CONFIRMED"
+  | "DAY_SETTLED";
+
+/**
+ * `/api/intraday?sessionId=` **会话模式**出参（V3 日内 30m）。
+ *
+ * 防泄漏要点（全部由服务端强制，客户端不得干预）：
+ *  - `bars` 的上界锁死在会话 `currentDate`；**未揭示收盘时只返回当日第一根**（10:00），
+ *    即浏览器在 CLOSE_ANIMATION 之前**拿不到**当日 10:30 及之后的任何 K；
+ *  - 被污染标记命中的交易日一律返回空数组（污染优先于揭示）；
+ *  - **不返回标的代码/名称**（沿用 SIMTRADE 身份隐藏红线）。
+ */
+export interface SimTradeIntradayInfo {
+  mode: "session";
+  sessionId: string;
+  /** 会话当前模拟日 YYYY-MM-DD */
+  date: string;
+  stage: SimTradeStage;
+  /** 当日已揭示的 30m 根数（0 = 该日无 30m 数据或被污染排除） */
+  barCount: number;
+  /** 标准根数（8），供前端判断当日日内数据是否可用 */
+  expectedBars: number;
+  /** 当日收盘价是否已揭示（CLOSE_ANIMATION 起为 true） */
+  revealClose: boolean;
+  /** V3：服务端实际采用的 30m 可见根数（= 会话游标；收盘揭示后恒为 8） */
+  intradayBarCount: number;
+  /** 是否已揭示全部 8 根（等价于 `revealClose`） */
+  fullDayRevealed: boolean;
+  bars: IntradayBar[];
+  /** 是否因污染标记被排除 */
+  excludedByContamination: boolean;
+  /** 本会话区间内被标记的污染日（升序） */
+  contaminatedDatesInSession: string[];
+  /** `bars.length > 0`。为 false 时前端应回落日K 视图 */
+  intradayAvailable: boolean;
+
+  /* ================= V3 分时图契约（2026-09-23 新增） ================= */
+
+  /**
+   * **分时图的 0 轴基准** —— 前一交易日的收盘价（前复权）。
+   *
+   * 口径硬约束：**不是当日开盘价**。涨跌幅一律按
+   * `(price - prevClose) / prevClose * 100` 计算。
+   *
+   * 该值永远来自**已经结算完的历史交易日**，因此不构成任何未来数据泄露。
+   * 若该标的在会话区间内没有前一日（首日无历史）→ 为 null，前端应退化为以
+   * 当日开盘为基准。
+   */
+  prevClose: number | null;
+
+  /**
+   * 已揭示的分时点，**升序**。
+   *
+   * 长度 = `barCount + 1`：首点是 **09:30 开盘锚点**（价格 = 第 1 根 30m 的 open，
+   * 即 09:30 的真实成交价 —— 第 1 根 30m K 覆盖 09:30~10:00，其 open 就是 09:30 价），
+   * 其后每个点对应一根**已揭示**的 30m K 的收盘时刻与收盘价。
+   *
+   * 为什么要有 09:30 锚点：真实炒股软件的分时图横轴自 09:30 起，
+   * 只有 8 个收盘点会让曲线左侧缺一段。锚点用的 `open` 在**第 1 根揭示之后**
+   * 即为已知信息，不构成未来数据泄露。
+   *
+   * 前端只允许渲染本数组，**不得**自行按 `bars` 再切片或用完整日K 补齐；
+   * 服务端已按 `intradayBarCount` 裁剪，越界数据根本不存在于响应中。
+   */
+  ticks: SimTradeIntradayTick[];
+
+  /**
+   * 分时图横轴的完整刻度（`HH:MM`，升序）。
+   *
+   * = `["09:30", 8 个标准收盘时点]`，共 9 个。
+   *
+   * 仅供前端**画横轴刻度**（避免横轴随揭示进度伸缩抖动）。
+   * 横轴刻度不等于数据：未揭示时点在 `ticks` 中不存在。
+   */
+  times: string[];
+
+  /** 当日**已揭示部分**的累计成交量（= 各已揭示 30m 根 volume 之和） */
+  cumVolume: number;
+
+  /** 当前（最后 1 个已揭示节点）的价格；无数据时 null */
+  currentPrice: number | null;
+
+  /** 当前价格相对 `prevClose` 的涨跌幅 %；无数据时 null */
+  currentChangePercent: number | null;
+}
+
+/**
+ * 单个分时点（V3 分时图）。
+ *
+ * 一个点 = 一根 30 分钟 K 的**收盘时刻**与其收盘价。
+ * 之所以不暴露 OHLC：分时图只画价格折线，暴露影线就等于多给了一份日内极值信息。
+ */
+export interface SimTradeIntradayTick {
+  /** 时点 `HH:MM`（如 `10:30`），升序排列 */
+  time: string;
+  /** 该时点价格 = 该根 30m K 的 close（前复权） */
+  price: number;
+  /** 相对 `prevClose` 的涨跌幅 %（prevClose 缺失时为 null） */
+  changePercent: number | null;
+  /** 该根 30m K 的成交量 */
+  volume: number;
+}
+
+/**
+ * **当日动态形成中的日K**（V3 核心防泄漏结构）。
+ *
+ * 语义：当前正在模拟的交易日，其日K**由已经揭示的 30m K 现场合成**，
+ * 绝不是数据库里那根已收盘的完整日K。
+ *
+ *   open   = 第 1 根 30m 的 open
+ *   high   = 已揭示各根 high 的最大值
+ *   low    = 已揭示各根 low 的最小值
+ *   close  = 最后 1 根已揭示 30m 的 close（= 当前价）
+ *   volume = 已揭示各根 volume 之和（**绝不提前给全天量**）
+ *
+ * 进入 `CLOSE_ANIMATION` 之后（8 根全揭示）它才等于当日最终日K，
+ * 此时 `finalized = true`。
+ */
+export interface SimTradeTodayBar {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  amount: number;
+  /** 相对前收的涨跌幅 %（`(close - prevClose) / prevClose * 100`） */
+  changePercent: number | null;
+  /** 已参与合成的 30m 根数（未揭示收盘时 1~7；揭示后 8） */
+  revealedBars: number;
+  /** 是否已定格为当日最终日K（进入 CLOSE_ANIMATION 之后为 true） */
+  finalized: boolean;
+  /** 合成数据来源：`INTRADAY_30M` = 由 30m 现场合成；`DAILY_K` = 30m 不可用时的退化口径 */
+  source: "INTRADAY_30M" | "DAILY_K";
+}
+
+/**
+ * 股票池类型：
+ *  - `STOCK`    全部 A 股（默认）
+ *  - `INDEX`    指数
+ *  - `INDUSTRY` 行业板块
+ */
+export type SimTradePool = "STOCK" | "INDEX" | "INDUSTRY";
+
+/**
  * 单日操作类型（服务端对每日唯一操作的类型化枚举）。
  *  - BUY   加仓（首次买入或补仓）
  *  - SELL  减仓/清仓
@@ -483,6 +679,36 @@ export interface SimTradeInfo {
   /** 玩家是否已揭晓股票 */
   revealed: boolean;
   createdAt: string;
+  /* ---------------- V2 阶段状态机 ---------------- */
+  /** 当前交易阶段（服务端唯一权威） */
+  stage: SimTradeStage;
+  /**
+   * 本阶段（时间窗）内是否已经操作过至少一次。
+   *
+   * ⚠️ V3 起它**不再表示「本阶段不可再操作」** —— 一个阶段内允许多次操作，
+   * 「能否继续操作」由 `remainingOps` 决定；它现在只用于展示与「时间可否推进」。
+   */
+  stageActionCompleted: boolean;
+  /** 当日剩余可**买入**次数（上限 2；观望不消耗） */
+  remainingBuy: number;
+  /** 当日剩余可**卖出**次数（上限 2） */
+  remainingSell: number;
+  /** 当日**已用**总操作次数（BUY / SELL / HOLD 统一计数） */
+  operationCount: number;
+  /** 当日**剩余**总操作次数（上限 8）。为 0 时当天操作锁定 */
+  remainingOps: number;
+  /** 30m 游标：当日已揭示的 30 分钟 K 根数（1~8）。与操作计数**解耦** */
+  intradayBarCount: number;
+  /** 当前阶段允许揭示的 30m 根数上限（开盘阶段 7 / 其余 8） */
+  maxRevealableBars: number;
+  /** 当前 30m 时点文案（如 `10:30`） */
+  currentIntradayTime: string;
+  /** V3 确认模式：服务端待确认的操作（null = 无）。前端 pending 以服务端为准 */
+  pendingAction: SimTradeAction | null;
+  /** V3 确认模式：待确认操作的比例（HOLD 为 0） */
+  pendingPercent: number | null;
+  /** 股票池类型 */
+  pool: SimTradePool;
 }
 
 /**
@@ -532,6 +758,44 @@ export interface SimTradeFill {
   totalFee: number;
   realizedPnl: number;
   tradedAt: string;
+  /**
+   * 成交对应的 **30 分钟时点** `HH:MM`（如 `10:30`），用于在分时图上定位买卖点。
+   *
+   * 为什么需要单独一个字段：`tradedAt` 存的是**日期**（`YYYY-MM-DD`），
+   * 它无法区分「同日 10:00 买入」与「同日 14:30 卖出」—— 而分时图的横轴
+   * 恰恰是时点，没有它就画不出买卖点。
+   *
+   * 取值来源：**由成交价反推**（见 simtradeService 的 `deriveFillBarTimes`）。
+   * 依据是「成交价 = 成交那一刻那根 30m K 的 close」这一确定性事实（服务端即以此定价）。
+   * 无法确定时为 `null`（例如 30m 数据缺失、退化为日K 口径）—— 此时**不画该点**，
+   * 而不是猜一个位置。
+   */
+  barTime?: string | null;
+}
+
+/**
+ * 当日成交概览（供图表标注与「做T」识别）。
+ *
+ * 「做T」定义：**同一交易日内既有买入又有卖出**。
+ * A 股 T+1 制度下当日买入不可卖，因此做T 必然是「先卖后买」或「先买（昨天仓位）后卖」
+ * 的组合；这里不做先后顺序判断，只按「双向都发生过」认定 —— 这与玩家对「做T」的
+ * 口语理解一致，也避免了用真实时间戳去猜模拟时间顺序（两者无映射关系）。
+ */
+export interface SimTradeTodayTrades {
+  /** 当日成交笔数 */
+  count: number;
+  /** 当日买入笔数 */
+  buyCount: number;
+  /** 当日卖出笔数 */
+  sellCount: number;
+  /** 当日买入金额合计 */
+  buyAmount: number;
+  /** 当日卖出金额合计 */
+  sellAmount: number;
+  hasBuy: boolean;
+  hasSell: boolean;
+  /** 双向交易（做T） */
+  isDayTrade: boolean;
 }
 
 /**
@@ -561,6 +825,27 @@ export interface SimTradeDayRecord {
  * （含当前日，**仅 open**，当日 high/low/close 用占位以避免泄露未来），
  * `openPrice` 为当日开盘价（唯一允许提前揭示的当日价格）。
  */
+/**
+ * 大盘参照项：一个指数在当前会话的**最新可见点位**与涨跌（只给数，不给图）。
+ *
+ * 与个股共用同一套防泄漏规则：未确认当日时，最新点位 = **当日开盘**（当日收盘不揭示），
+ * `date` 永远不晚于会话 currentDate。
+ */
+export interface SimTradeBenchmark {
+  /** 带交易所前缀的指数代码（如 sh000001 / sz399001） */
+  code: string;
+  /** 指数名称（如 上证指数 / 深证成指 / 创业板指） */
+  name: string;
+  /** 最新可见点位对应的交易日 */
+  date: string;
+  /** 最新可见点位（未确认当日时 = 当日开盘；已确认时 = 当日收盘） */
+  value: number;
+  /** 相对上一交易日同口径的涨跌额 */
+  change: number;
+  /** 涨跌幅 % */
+  changePercent: number;
+}
+
 export interface SimTradeSnapshot {
   session: SimTradeInfo;
   /** 账户汇总（现金 / 市值 / 总资产 / 累计盈亏 / 收益率 / 仓位） */
@@ -571,20 +856,94 @@ export interface SimTradeSnapshot {
   position: SimTradePosition | null;
   /** 可见历史 K 线（升序，含当前日；只到 currentDate 为止，无未来） */
   history: KlineBar[];
+  /**
+   * 大盘参照：上证指数 / 创业板指 / 科创50 的可见 K 线（升序）。
+   *
+   * 每一项与个股 `history` **同窗口、同一条防泄漏红线**：右端点同样是 currentDate，
+   * 当日未结算时同样只揭示开盘价（high/low/close 用 open 占位）。
+   * 纯展示对照，不参与任何交易/估值计算；库里没有该指数时该项 bars 为空数组。
+   */
+  benchmarks: SimTradeBenchmark[];
   /** 当日开盘价（唯一允许提前揭示的当日价格） */
   openPrice: number;
-  /** 当日是否可交易（当前日为真实交易日且未结束） */
+  /**
+   * V3：**前一交易日收盘价**（前复权）—— 分时图 0 轴基准、顶部「前收」展示用。
+   *
+   * 永远来自已结算完的历史交易日，不构成未来数据泄露。
+   * 会话首日（无前一日）时为最后一根可见历史K的收盘，仍为历史数据。
+   */
+  prevClose: number | null;
+  /**
+   * 当日收盘价 —— **仅当阶段进入 `CLOSE_ANIMATION` 及之后才返回**；
+   * 在 `OPEN` / `OPEN_CONFIRMED` 阶段恒为 `null`（防泄漏：不得提前暴露当日收盘）。
+   */
+  todayClose: number | null;
+  /** 当前交易阶段（冗余自 session，便于前端直接分支） */
+  stage: SimTradeStage;
+  /** 本阶段成交价：`OPEN` = 开盘价 / `CLOSE` = 收盘价 / 其它阶段为 `null`（不可交易） */
+  stageFillPrice: number | null;
+  /**
+   * 成交价来源（V3 阶段 6）：
+   *  - `"INTRADAY_30M"`：取自当前**已揭示的 30m K**（取 close）；
+   *  - `"DAILY_K"`：30m 数据不可用时的退化口径（日K 开盘/收盘价）；
+   *  - `null`：当前不可交易。
+   */
+  fillPriceSource: "INTRADAY_30M" | "DAILY_K" | null;
+  /** 30m 成交价对应的时点（如 `10:30`）；非 30m 来源时为 `null` */
+  fillPriceTime: string | null;
+  /** 本阶段（时间窗）内是否已操作过至少一次（V3 起不再是「不可操作」标志） */
+  stageActionCompleted: boolean;
+  /** 当日剩余可买入次数（上限 2） */
+  remainingBuy: number;
+  /** 当日剩余可卖出次数（上限 2） */
+  remainingSell: number;
+  /** 当日已用总操作次数（BUY / SELL / HOLD 统一计数） */
+  operationCount: number;
+  /** 当日剩余总操作次数（上限 8） */
+  remainingOps: number;
+  /** 30m 游标：当日已揭示的 30 分钟 K 根数（1~8）。与操作计数解耦 */
+  intradayBarCount: number;
+  /** 当前阶段允许揭示的 30m 根数上限（开盘阶段 7 / 其余 8） */
+  maxRevealableBars: number;
+  /** 当前 30m 时点文案（如 `10:30`） */
+  currentIntradayTime: string;
+  /** V3 确认模式：服务端待确认的操作（null = 无）。前端 pending 以服务端为准 */
+  pendingAction: SimTradeAction | null;
+  /** V3 确认模式：待确认操作的比例（HOLD 为 0） */
+  pendingPercent: number | null;
+  /** 当日是否可交易（ACTIVE 且处于 OPEN / CLOSE 阶段且 `remainingOps > 0`） */
   tradable: boolean;
   /** 最近一次操作记录（用于「结算结果」展示）；无操作为 null */
   lastAction: SimTradeDayRecord | null;
   /** 累计交易笔数 */
   tradeCount: number;
+  /**
+   * 本会话全部成交明细（升序，含 `barTime` 30m 时点）—— 供图表标注买卖点。
+   *
+   * 防泄漏：数组内**只含已发生**的成交（来自 trades 表），不存在任何未来交易，
+   * 因此可以安全下发；这与会「泄露未来」的行情数据是两类东西。
+   */
+  fills: SimTradeFill[];
+  /** 当日成交概览：买卖笔数、金额，以及是否「做T」（当日双向交易） */
+  todayTrades: SimTradeTodayTrades;
   /** 每日资产快照曲线（升序，仅含 currentDate 及以前） */
   curve: DailyAssetInfo[];
   /** 绩效指标 */
   metrics: PerformanceMetrics;
   /** 最终结算（仅 FINISHED 时给出）：买入持有基准对照 */
   settlement: SimTradeSettlement | null;
+  /**
+   * V3：**当日动态形成中的日K**（防泄漏核心）。
+   *
+   * 与 `history` 末根的关系：`history` 里的当日那根**就是**由本结构写入的
+   * （已同步替换为动态值），因此图表均线（MA5/10/20/60）会自动基于动态日K 计算。
+   * 本字段额外把「已揭示根数 / 是否定格 / 涨跌幅 / 数据来源」显式暴露出来，
+   * 供前端展示与测试断言，避免前端反推到错误结论。
+   *
+   * 无 30m 数据且未揭示收盘时为 null（此时 `history` 末根退化为 open 占位且
+   * **成交量为 0**，绝不泄露全天量）。
+   */
+  todayBar: SimTradeTodayBar | null;
 }
 
 /**
@@ -624,15 +983,34 @@ export interface CreateSimTradeInput {
   tradingDays?: number;
   /** 会话名（可选，仅内部展示） */
   name?: string;
+  /** 股票池类型（默认 STOCK 全部 A 股） */
+  pool?: SimTradePool;
 }
 
 /** 每日提交操作入参 */
 export interface SubmitSimTradeActionInput {
   /** 操作类型 */
   action: SimTradeAction;
-  /** BUY/SELL 时的比例档位（0~100，整数） */
+  /**
+   * 操作比例（1~100 的整数）。
+   *
+   * **BUY / SELL 必须显式给出**：缺省、null、NaN、越界一律拒绝，
+   * 绝不静默退化为 100% 满仓（隐式全仓属危险行为）。HOLD 忽略该字段。
+   */
   percent?: number;
+  /**
+   * 执行模式（V3）：
+   *  - `"INSTANT"` 立即执行 —— 服务端校验后直接下单成交；
+   *  - `"CONFIRM"` 需要确认 —— 服务端先把它落库为 **pending**，再由 `/confirm` 成交。
+   *
+   * 默认 `"CONFIRM"`（更安全）：只在两种模式下走**同一套**交易规则，
+   * 差别仅在「何时执行」，不在「如何执行」。
+   */
+  mode?: SimTradeExecutionMode;
 }
+
+/** V3 执行模式：立即执行 / 需要确认 */
+export type SimTradeExecutionMode = "INSTANT" | "CONFIRM";
 
 /* ------------------------------------------------------------------ */
 /*                      策略回测（Backtest，第一批）                    */

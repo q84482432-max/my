@@ -254,6 +254,60 @@ export async function getKlineAt(
 }
 
 /**
+ * 取得**严格早于** `date` 的最后一根日K —— 即「前一交易日收盘价」。
+ *
+ * 与 `getKlineAt` 的唯一差别是边界：后者 `lte`（含当日），本函数 `lt`（不含当日）。
+ *
+ * 为什么必须区分（V3 分时图 0 轴）：分时图的基准是**前一交易日收盘价**。
+ * 若误用 `lte`，在当日已有日K 时会把**当日自己**取回来当基准，
+ * 导致涨跌幅恒为 0、0 轴画在错误位置 —— 这类错误在数据上看不出破绽，
+ * 只会在界面上表现为「分时图永远贴着 0 轴」。
+ */
+export async function getPrevKlineBefore(
+  stockCode: string,
+  date: string,
+  adjust?: AdjustType,
+): Promise<KlineBar | null> {
+  const stock = await prisma.stock.findUnique({
+    where: { code: stockCode },
+    select: { id: true, adjust: true },
+  });
+  if (!stock) return null;
+
+  const useAdjust = adjust ?? (stock.adjust as AdjustType);
+
+  const row = await prisma.kline.findFirst({
+    where: {
+      stockId: stock.id,
+      period: "1d",
+      adjust: useAdjust,
+      tradeDate: { lt: normalizeDate(date) },
+    },
+    orderBy: { tradeDate: "desc" },
+    select: {
+      tradeDate: true,
+      open: true,
+      high: true,
+      low: true,
+      close: true,
+      volume: true,
+      amount: true,
+    },
+  });
+  if (!row) return null;
+
+  return {
+    date: toDateStr(row.tradeDate),
+    open: num(row.open),
+    high: num(row.high),
+    low: num(row.low),
+    close: num(row.close),
+    volume: num(row.volume),
+    amount: num(row.amount),
+  };
+}
+
+/**
  * 获取最新一根日K（即最新行情）。
  *
  * 口径处理同 getKlineAt：不传 adjust 时按该股票自身口径取数。
@@ -568,15 +622,21 @@ export async function getStockQuotes(
     Array<{
       code: string;
       tradeDate: Date | string;
+      open: unknown;
+      high: unknown;
+      low: unknown;
       close: unknown;
       volume: unknown;
       amount: unknown;
       rn: bigint | number;
     }>
   >(Prisma.sql`
-    SELECT code, "tradeDate", close, volume, amount, rn FROM (
+    SELECT code, "tradeDate", open, high, low, close, volume, amount, rn FROM (
       SELECT s."code" AS code,
              k."tradeDate" AS "tradeDate",
+             k."open" AS open,
+             k."high" AS high,
+             k."low" AS low,
              k."close" AS close,
              k."volume" AS volume,
              k."amount" AS amount,
@@ -610,6 +670,12 @@ export async function getStockQuotes(
       lastPrice,
       change,
       changePercent,
+      /* 当日 开 / 高 / 低 —— 与 `lastPrice` 同源（**同一根最新日K**），
+         所以四者口径天然一致，不会出现「收盘来自 A 日、开高低来自 B 日」的错配。
+         缺失（无K线）时给 0，与 lastPrice 的兜底一致。 */
+      open: l ? num(l.open) : 0,
+      high: l ? num(l.high) : 0,
+      low: l ? num(l.low) : 0,
       volume: l ? num(l.volume) : 0,
       amount: l ? num(l.amount) : 0,
       prevClose,
@@ -887,6 +953,40 @@ export async function listTradingDates(from: string, to: string): Promise<string
   return rows.map((r) => toDateStr(r.tradeDate));
 }
 
+/**
+ * 列出**指定单只股票**在 [from, to] 区间内实际存在日K 的交易日（升序、去重）。
+ *
+ * 与 `listTradingDates` 的分工（勿混用）：
+ *  - `listTradingDates` 回答「**市场**在这些日子里哪天开市」——用于交易日历推进；
+ *  - 本函数回答「**这只股票**在这些日子里哪天有行情」——停牌日会被如实排除。
+ *    30m 区间读取必须先知道「该股哪些日子有日K」，否则会对停牌日发起无意义的
+ *    Parquet 查询、并让前端图表出现空洞而无法区分「停牌」与「数据缺失」。
+ *
+ * 为什么用原生 SQL 而不是 Prisma 的 `distinct`：
+ *  与 `listTradingDates` 注释里记录的性能红线同因 —— Prisma 在 SQLite 上的
+ *  `distinct` 是**内存去重**（先取回全部行再在 Node 里筛）。这里改由 SQL 层
+ *  `DISTINCT` 完成，只回传日期字符串，且走 `(stockId, period, tradeDate)` 索引。
+ *
+ * 参数一律走 `Prisma.sql` 绑定（**不用 `$queryRawUnsafe`**），代码与调用点均无
+ * 字符串拼接，消除注入面。
+ */
+export async function listDailyDatesForCode(
+  code: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  if (!code || !from || !to || from > to) return [];
+  const rows = await prisma.$queryRaw<Array<{ d: string }>>(Prisma.sql`
+    SELECT DISTINCT date(k."tradeDate" / 1000, 'unixepoch') AS d
+      FROM "klines" k
+      JOIN "stocks" s ON s."id" = k."stockId"
+     WHERE s."code" = ${code} AND k."period" = '1d'
+       AND date(k."tradeDate" / 1000, 'unixepoch') BETWEEN ${from} AND ${to}
+     ORDER BY d
+  `);
+  return rows.map((r) => String(r.d));
+}
+
 /** 创建或更新股票基础信息 */
 export async function ensureStock(input: {
   code: string;
@@ -1027,14 +1127,31 @@ export async function listCodesHavingKlines(take?: number): Promise<string[]> {
  *
  * 注意 `ORDER BY RANDOM()` 在 stocks 表（5558 行）上代价很低，可放心用于交互式创建。
  */
-export async function listRandomCodesHavingKlines(take: number): Promise<string[]> {
+export async function listRandomCodesHavingKlines(
+  take: number,
+  opts: { excludeSt?: boolean } = {},
+): Promise<string[]> {
   if (!Number.isFinite(take) || take <= 0) return [];
+  const limit = Math.floor(take);
+  // excludeSt：排除 ST / *ST / SST / S*ST 等风险警示与退市整理期标的
+  // （A 股此类标的名称一律含 "ST"；SQLite 的 LIKE 对 ASCII 大小写不敏感，足够覆盖）
+  if (opts.excludeSt === true) {
+    const rows = await prisma.$queryRaw<Array<{ code: string }>>`
+      SELECT code FROM stocks
+      WHERE isActive = 1
+        AND name NOT LIKE '%ST%'
+        AND EXISTS (SELECT 1 FROM klines WHERE klines.stockId = stocks.id)
+      ORDER BY RANDOM()
+      LIMIT ${limit}
+    `;
+    return rows.map((r) => r.code);
+  }
   const rows = await prisma.$queryRaw<Array<{ code: string }>>`
     SELECT code FROM stocks
     WHERE isActive = 1
       AND EXISTS (SELECT 1 FROM klines WHERE klines.stockId = stocks.id)
     ORDER BY RANDOM()
-    LIMIT ${Math.floor(take)}
+    LIMIT ${limit}
   `;
   return rows.map((r) => r.code);
 }

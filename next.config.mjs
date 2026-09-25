@@ -10,6 +10,10 @@
  */
 const nextConfig = {
   reactStrictMode: true,
+  // dev 模式下允许本机两种写法访问（Next 16 默认拦跨源 dev 资源：
+  // 用 127.0.0.1 打开 localhost 起的 dev server 时，/_next/hmr 与客户端 chunk 会被拒，
+  // 表现为「只有 SSR 空态、永不 hydrate」，看着像功能坏了。加白名单消除该坑。）
+  allowedDevOrigins: ["localhost", "127.0.0.1"],
   // 生产部署使用 standalone 产物：本地构建好后整包上传，服务器只跑 runtime，
   // 避免在 2G 内存的小机器上执行 next build（极易 OOM）。
   output: "standalone",

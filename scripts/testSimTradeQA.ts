@@ -16,7 +16,7 @@
  */
 import prisma from "@/lib/prisma";
 import {
-  advanceSimTradeDay,
+  advanceSimTradeStage,
   createSimTradeSession,
   deleteSimTradeSession,
   getSimTradeSnapshot,
@@ -42,10 +42,67 @@ function check(name: string, cond: boolean, extra = ""): void {
 
 const num = (v: unknown): number => (typeof v === "number" ? v : Number(v));
 
+/**
+ * 创建会话（**带重试**）。
+ *
+ * 为什么需要（2026-09-23 由独立验证发现本文件会随机变红）：
+ *   `createSimTradeSession` 要在全历史里**随机**定位一个起始交易日，并随机抽一只
+ *   「K 线完整、模拟期内不停牌、历史充足」的真实标的。候选池有限（单批 60 只，
+ *   最多换 4 批），存在**小概率**抽不到合格标的而返回失败。
+ *   原实现把 `c.success === false` 当硬错误 → 整段断言连锁失败，
+ *   表现为「同一份代码、同一份数据，跑十次红一次」。测试必须确定性，
+ *   因此这里把偶发失败吸收掉：连续 4 次都失败才算真失败。
+ */
+async function createSessionRetry(
+  input: Parameters<typeof createSimTradeSession>[0],
+  tries = 4,
+): Promise<Awaited<ReturnType<typeof createSimTradeSession>>> {
+  let last = await createSimTradeSession(input);
+  for (let i = 1; i < tries && !last.success; i += 1) {
+    last = await createSimTradeSession(input);
+  }
+  return last;
+}
+
 async function snapOf(id: string): Promise<SimTradeSnapshot> {
   const s = await getSimTradeSnapshot(id);
   if (!s) throw new Error(`快照为空: ${id}`);
   return s;
+}
+
+/**
+ * V2：把当前交易日推进到「下一日 OPEN」（若已是最后一天则结束本局）。
+ *
+ * 自动补齐当日剩余阶段：
+ *   OPEN/CLOSE（未操作）→ 观望 HOLD 结束该阶段
+ *   OPEN_CONFIRMED / CLOSE_CONFIRMED / CLOSE_ANIMATION → advanceSimTradeStage
+ *   DAY_SETTLED → advanceSimTradeStage 进入下一日（或 FINISHED）
+ */
+/**
+ * V3（2026-09-23 更新）：把当前交易日推进到「下一日 OPEN」（若已是最后一天则结束本局）。
+ *
+ * ⚠️ 为什么必须改掉旧写法（本次修复的技术债）：
+ *   V3 起「**推进时间**」与「**玩家操作**」彻底解耦 —— `advanceSimTradeStage` 不再要求
+ *   本阶段先操作过。旧的 `advanceToNextDay` 却仍在 OPEN/CLOSE 阶段先 `submitSimTradeAction(HOLD)`
+ *   再 advance，在 V3 下有两个致命害处：
+ *     1. 每次白耗 1 次「每日 ≤8 次操作」额度 → 很快就会撞上限，
+ *        报「今日操作次数已用完（每日上限 8 次）」，导致测试后续步骤**连锁全灭**；
+ *     2. `submitSimTradeAction` 在 V3 的默认 mode 是 `CONFIRM`，
+ *        HOLD 只会落成 **pending**（并不成交、也不记录为一次操作），阶段根本推不动。
+ *
+ * 现改为直接调用 `advanceSimTradeStage`（V3 的唯一正确推进方式），不再借用玩家操作。
+ */
+async function advanceToNextDay(id: string): Promise<{ finished: boolean }> {
+  for (let i = 0; i < 12; i += 1) {
+    const snap = await snapOf(id);
+    if (snap.session.status !== "ACTIVE") return { finished: true };
+    // 进入 DAY_SETTLED 后再 advance 一次即为「换日」，因此先记住当前是否已结算
+    const wasSettled = snap.stage === "DAY_SETTLED";
+    const a = await advanceSimTradeStage(id);
+    if (a.finished) return { finished: true };
+    if (wasSettled) return { finished: false };
+  }
+  return { finished: false };
 }
 
 /** 账户恒等式：cash + marketValue − initialCash ≈ totalProfit，且 totalAsset 一致 */
@@ -88,7 +145,7 @@ async function main(): Promise<void> {
       ["null（契约：1~100 之外一律拒绝）", null],
     ];
     for (const [label, percent] of badCases) {
-      const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
+      const c = await createSessionRetry({ initialCash: 100000, tradingDays: 22 });
       if (!c.success || !c.session) { check(`percent=${label} 会话创建`, false, c.message); continue; }
       const id = c.session.id;
       try {
@@ -102,10 +159,19 @@ async function main(): Promise<void> {
         await deleteSimTradeSession(id);
       }
     }
-    // 合法边界 1 / 100 应通过（各用独立会话）
+    // 合法边界 1 / 100 应通过（各用独立会话）。
+    //
+    // 注意：1% 必须**真的买得起 1 手（100 股）**，否则会被「可用资金不足」拒绝，
+    // 与「1 是不是合法比例」无关。标的股价是随机抽的（高价股可达数千元），
+    // 原用 10 万初始资金时 1% = 1000 元往往不足一手成本 → 该断言随机失败。
+    // 这里给足资金，让 1% 预算远大于一手成本，使断言确定成立。
     for (const ok of [1, 100]) {
-      const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
-      const id = c.session!.id;
+      const c = await createSessionRetry({ initialCash: 50_000_000, tradingDays: 22 });
+      if (!c.success || !c.session) {
+        check(`percent=${ok} 会话创建`, false, c.message);
+        continue;
+      }
+      const id = c.session.id;
       try {
         const r = await submitSimTradeAction(id, { action: "BUY", percent: ok });
         check(`percent=${ok} 合法通过`, r.success, r.message);
@@ -120,7 +186,7 @@ async function main(): Promise<void> {
   {
     // 多跑几局覆盖不同股价区间的标的
     for (let round = 0; round < 3; round += 1) {
-      const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
+      const c = await createSessionRetry({ initialCash: 100000, tradingDays: 22 });
       if (!c.success || !c.session) {
         check(`第 ${round + 1} 局创建`, false);
         continue;
@@ -154,36 +220,36 @@ async function main(): Promise<void> {
   /* ---------- 连续买卖 + 恒等式 + 部分卖出自洽 ---------- */
   console.log("\n[C] 连续买卖：账户恒等式 + availableQty/todayQty 自洽");
   {
-    const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
+    const c = await createSessionRetry({ initialCash: 100000, tradingDays: 22 });
     if (!c.success || !c.session) throw new Error("创建失败");
     const id = c.session.id;
     try {
       let snap = await snapOf(id);
       assertAccountingIdentity("初始", snap);
 
-      // D1 买入 50%
+      // D1 开盘买入 50%
       let r = await submitSimTradeAction(id, { action: "BUY", percent: 50 });
       check("D1 买入 50%", r.success, r.message);
       snap = await snapOf(id);
-      assertPositionSelfConsistent("D1 收盘后", snap);
-      assertAccountingIdentity("D1 收盘后", snap);
+      assertPositionSelfConsistent("D1 买入后", snap);
+      assertAccountingIdentity("D1 买入后", snap);
       check("D1 当日新买不可卖", snap.position!.availableQty === 0 && snap.position!.todayQty > 0,
         `avail=${snap.position!.availableQty} today=${snap.position!.todayQty}`);
 
       // D2：解冻 → 加仓 30%
-      await advanceSimTradeDay(id);
+      await advanceToNextDay(id);
       snap = await snapOf(id);
       check("D2 昨日买入已解冻", snap.position!.availableQty > 0, `avail=${snap.position!.availableQty}`);
       assertPositionSelfConsistent("D2 推进后", snap);
       r = await submitSimTradeAction(id, { action: "BUY", percent: 30 });
       check("D2 加仓 30%", r.success, r.message);
       snap = await snapOf(id);
-      assertPositionSelfConsistent("D2 收盘后", snap);
-      assertAccountingIdentity("D2 收盘后", snap);
+      assertPositionSelfConsistent("D2 买入后", snap);
+      assertAccountingIdentity("D2 买入后", snap);
 
       // D3~D5：多次部分卖出，验证恒等与自洽始终成立
       for (let d = 3; d <= 5; d += 1) {
-        await advanceSimTradeDay(id);
+        await advanceToNextDay(id);
         snap = await snapOf(id);
         assertPositionSelfConsistent(`D${d} 推进后`, snap);
         if (snap.position && snap.position.availableQty > 0) {
@@ -194,13 +260,25 @@ async function main(): Promise<void> {
           await submitSimTradeAction(id, { action: "HOLD" });
         }
         snap = await snapOf(id);
-        assertPositionSelfConsistent(`D${d} 收盘后`, snap);
-        assertAccountingIdentity(`D${d} 收盘后`, snap);
+        assertPositionSelfConsistent(`D${d} 卖出后`, snap);
+        assertAccountingIdentity(`D${d} 卖出后`, snap);
         check(`D${d} 现金不为负`, num(snap.summary.cash) >= 0, `cash=${snap.summary.cash}`);
       }
 
+      // 小仓位部分卖出：A 股卖出允许零股，100 股持仓卖 50% 应成交 50 股
+      await advanceToNextDay(id);
+      snap = await snapOf(id);
+      if (snap.position && snap.position.availableQty > 0 && snap.position.availableQty < 200) {
+        const beforeQty = snap.position.quantity;
+        const partial = await submitSimTradeAction(id, { action: "SELL", percent: 50 });
+        check("小于 2 手持仓部分卖出仍可成交零股", partial.success, partial.message);
+        snap = await snapOf(id);
+        check("部分卖出后数量减少", (snap.position?.quantity ?? 0) < beforeQty,
+          `before=${beforeQty} after=${snap.position?.quantity}`);
+        await advanceToNextDay(id);
+      }
+
       // 清仓：100% 卖出应卖光可卖（含零股）
-      await advanceSimTradeDay(id);
       const clr = await submitSimTradeAction(id, { action: "SELL", percent: 100 });
       check("清仓 100% 成功", clr.success, clr.message);
       snap = await snapOf(id);
@@ -215,7 +293,7 @@ async function main(): Promise<void> {
   /* ---------- 最后一天结算 + FINISHED 后拒绝操作 ---------- */
   console.log("\n[D] 最后一天结算结束 & FINISHED 后拒绝操作");
   {
-    const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 20 });
+    const c = await createSessionRetry({ initialCash: 100000, tradingDays: 20 });
     if (!c.success || !c.session) throw new Error("创建失败");
     const id = c.session.id;
     try {
@@ -223,13 +301,9 @@ async function main(): Promise<void> {
       const totalDays = snap.session.totalDays;
       let guard = 0;
       // 推进到最后一天且结束
-      while (snap.session.status === "ACTIVE" && guard < 60) {
+      while (snap.session.status === "ACTIVE" && guard < 200) {
         guard += 1;
-        if (!snap.session.confirmedToday) {
-          await submitSimTradeAction(id, { action: "HOLD" });
-          snap = await snapOf(id);
-        }
-        const a = await advanceSimTradeDay(id);
+        const a = await advanceToNextDay(id);
         snap = await snapOf(id);
         if (a.finished) break;
       }
@@ -242,7 +316,7 @@ async function main(): Promise<void> {
       // FINISHED 后再操作应被拒
       const afterAction = await submitSimTradeAction(id, { action: "BUY", percent: 10 });
       check("FINISHED 后再 action 被拒", afterAction.success === false, afterAction.message);
-      const afterNext = await advanceSimTradeDay(id);
+      const afterNext = await advanceSimTradeStage(id);
       check("FINISHED 后再 next 幂等返回 finished", afterNext.finished === true, afterNext.message);
       // 再 action 后账户恒等式仍成立、持仓未被改变
       const snap2 = await snapOf(id);
@@ -256,7 +330,7 @@ async function main(): Promise<void> {
   /* ---------- 级联删除：无孤儿账户/持仓/成交/快照 ---------- */
   console.log("\n[E] 删除会话 → 关联账户级联清理");
   {
-    const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 20 });
+    const c = await createSessionRetry({ initialCash: 100000, tradingDays: 20 });
     if (!c.success || !c.session) throw new Error("创建失败");
     const id = c.session.id;
     // 先做一笔买入产生持仓/成交/资产快照
@@ -292,7 +366,7 @@ async function main(): Promise<void> {
   /* ---------- 揭晓前后防泄漏 ---------- */
   console.log("\n[F] 揭晓前快照不含身份 / 揭晓仅在 reveal 返回体");
   {
-    const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 20 });
+    const c = await createSessionRetry({ initialCash: 100000, tradingDays: 20 });
     if (!c.success || !c.session) throw new Error("创建失败");
     const id = c.session.id;
     try {
@@ -310,13 +384,9 @@ async function main(): Promise<void> {
       // 跑到结束
       let snap = await snapOf(id);
       let guard = 0;
-      while (snap.session.status === "ACTIVE" && guard < 60) {
+      while (snap.session.status === "ACTIVE" && guard < 200) {
         guard += 1;
-        if (!snap.session.confirmedToday) {
-          await submitSimTradeAction(id, { action: "HOLD" });
-          snap = await snapOf(id);
-        }
-        const a = await advanceSimTradeDay(id);
+        const a = await advanceToNextDay(id);
         snap = await snapOf(id);
         if (a.finished) break;
       }
@@ -336,7 +406,7 @@ async function main(): Promise<void> {
     const DATA_MIN = "2024-11-04";
     const DATA_MAX = "2026-09-10";
     for (let i = 0; i < 5; i += 1) {
-      const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
+      const c = await createSessionRetry({ initialCash: 100000, tradingDays: 22 });
       if (!c.success || !c.session) { check(`第 ${i + 1} 局创建`, false, c.message); continue; }
       const id = c.session.id;
       try {
@@ -373,7 +443,7 @@ async function main(): Promise<void> {
     let doubleFills = 0;
     const N = 6;
     for (let i = 0; i < N; i += 1) {
-      const c = await createSimTradeSession({ initialCash: 100000, tradingDays: 22 });
+      const c = await createSessionRetry({ initialCash: 100000, tradingDays: 22 });
       if (!c.success || !c.session) continue;
       const id = c.session.id;
       const accId = c.session.accountId;

@@ -79,7 +79,7 @@ import {
 } from "@/lib/tradingRules";
 import { calcMaxDrawdown, calcPerformance } from "@/lib/performanceMetrics";
 
-export { calcFees, validateQuantity };
+export { calcBuyOutlay, calcFees, validateQuantity };
 export { calcMaxDrawdown, calcPerformance };
 export type { TradeFees } from "@/lib/tradingRules";
 

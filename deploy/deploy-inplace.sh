@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # 服务器端：原地更新 Next.js standalone 产物。
 #
-# 用法（在服务器上）：bash /home/ubuntu/deploy-inplace.sh [包路径] [--with-modules]
+# 用法（在服务器上）：bash /home/ubuntu/deploy-inplace.sh [包路径] [--with-modules] [--with-schema]
 #   默认包路径 /home/ubuntu/ashare-standalone.tar.gz
 #   --with-modules：同时同步 node_modules（仅当依赖变更时需要，默认不同步）
+#   --with-schema ：若线上 prisma/schema.prisma 与本次构建所用 schema 不一致，则自动同步
+#                   （默认只检查并告警 —— 生产 schema 不自动覆盖）
 #
 # 设计原则 —— 只换代码，绝不碰数据：
 #   * prisma/dev.db（线上 770MB 生产库）原地不动
@@ -19,15 +21,30 @@
 #   2. **node_modules 默认不同步、且永不用 rsync --delete。** standalone 的 node_modules
 #      是精简集（仅 19 个包），带 --delete 会把线上独有的 prisma CLI 一并删掉；
 #      同时会再次引入平台相关的 prisma client。
+#   3. **Next 16 + Windows 构建会出现 Turbopack 哈希别名丢链**（本脚本 [4b/7] 已内置修复）：
+#      Turbopack 把 serverExternalPackages 建成 `.next/node_modules/@prisma/client-<hash>` 软链，
+#      Windows 上 standalone 只留下空目录 → 线上 require 该别名报 MODULE_NOT_FOUND → 走库的
+#      页面/接口全 500（`/` 500 而 `/simtrade` 200 就是它的典型特征）。
 #
 # 回滚：把 .next.pre-deploy-<时间戳> 换回 .next，server.js 同理，然后重启服务。
 set -euo pipefail
 
 APP=/home/ubuntu/app
-PKG="${1:-/home/ubuntu/ashare-standalone.tar.gz}"
-WITH_MODULES="${2:-}"
+PKG=/home/ubuntu/ashare-standalone.tar.gz
+WITH_MODULES=""
+WITH_SCHEMA=""
 PRISMA_BIN=/home/ubuntu/prisma-tool/node_modules/.bin/prisma
 TS="$(date +%Y%m%d-%H%M%S)"
+
+# 参数解析（顺序无关）：[包路径] [--with-modules] [--with-schema]
+for _a in "$@"; do
+  case "$_a" in
+    --with-modules) WITH_MODULES="--with-modules" ;;
+    --with-schema)  WITH_SCHEMA="--with-schema" ;;
+    *.tar.gz)       PKG="$_a" ;;
+    *) echo "FATAL: 未知参数 $_a"; exit 2 ;;
+  esac
+done
 
 export PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
 
@@ -69,6 +86,119 @@ if [ "$WITH_MODULES" = "--with-modules" ]; then
   fi
 else
   echo "SKIP: node_modules 未同步（依赖无变更时的正确行为）"
+fi
+
+echo "=== [4b/7] 修复 Turbopack 哈希别名（Next 16 / Windows 构建特有）==="
+# Next 16 起 Turbopack 会把 serverExternalPackages 建成哈希别名：
+#   .next/node_modules/@prisma/client-<hash>  ->  软链到  node_modules/@prisma/client
+# 而**在 Windows 上构建时，这个别名会以两种坏形态之一进入 tar 包**：
+#   (甲) 空目录 —— Windows 没能建成软链，只留下一个空目录；
+#   (乙) **悬空软链，且指向 Windows 路径**，例如
+#        client-2c3a283f134fdcb6 -> /d/a-share-sim-trading/node_modules/@prisma/client
+#        解到 Linux 上就是一个解析不了的链接。
+# 两种形态都会让 require('@prisma/client-<hash>') 抛 MODULE_NOT_FOUND，
+# 表现为**走库的页面/接口全 500**（`/` 500 而 `/simtrade` 200 是它的典型特征）。
+#
+# 🔴 事故复盘（2026-09-23 实测）：
+#   旧实现在 `find` 上用了 `-type d`，**根本匹配不到符号链接** —— 于是形态 (乙) 被完全跳过，
+#   脚本报告「修复 0 个」却放行部署，线上 `/` 与 `/api/simtrade` 全 500。
+#   同一次构建若 Turbopack 恰好只留下空目录（形态甲），旧实现又能修好 ——
+#   **这就是「同一个脚本，一次成功一次全站 500」的原因**。
+#   现改为：目录与符号链接一并枚举；用「能否解析（-e）」判断好坏；
+#   坏的重建后**再验一次**；末尾再跑一次全局悬空链接硬闸门。
+ALIAS_FIXED=0
+ALIAS_VERIFIED=0
+if [ -d .next/node_modules ]; then
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+
+    name="$(basename "$d")"
+    parent="$(basename "$(dirname "$d")")"
+    if [ "$parent" = "node_modules" ]; then
+      # 非作用域包：.next/node_modules/<name>
+      target="$APP/node_modules/$name"
+    else
+      # 作用域包：.next/node_modules/<scope>/<name>-<hash> → 去掉 -<hash>
+      target="$APP/node_modules/$parent/${name%-*}"
+    fi
+
+    # ---- 判断这个别名是不是坏的 ----
+    if [ -L "$d" ]; then
+      # 符号链接：**关键** —— 能解析就跳过；解析不了才算坏（悬空链接）
+      if [ -e "$d" ]; then
+        ALIAS_VERIFIED=$((ALIAS_VERIFIED + 1))
+        continue
+      fi
+      reason="悬空符号链接"
+    elif [ -d "$d" ]; then
+      if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
+        ALIAS_VERIFIED=$((ALIAS_VERIFIED + 1))
+        continue
+      fi
+      reason="空目录"
+    else
+      continue
+    fi
+
+    if [ -d "$target" ]; then
+      rm -rf "$d"
+      ln -s "$target" "$d"
+      if [ -e "$d" ]; then
+        echo "  FIXED($reason): $d -> $target"
+        ALIAS_FIXED=$((ALIAS_FIXED + 1))
+      else
+        echo "  FATAL: 重建后仍无法解析：$d -> $target"
+        exit 1
+      fi
+    else
+      echo "  SKIP : $d （真实包不存在：$target）"
+    fi
+  done < <(find .next/node_modules -mindepth 1 -maxdepth 2 \( -type d -o -type l \) 2>/dev/null)
+fi
+echo "OK: 修复 $ALIAS_FIXED 个哈希别名（另有 $ALIAS_VERIFIED 个已可解析）"
+
+# 硬闸门：.next/node_modules 下不得残留任何「解析不了的」条目。
+# 这一条是本次事故的直接教训 —— 修复逻辑漏判时必须**中止部署**，而不是放行到线上。
+ALIAS_BROKEN="$(find .next/node_modules \( -type l -o -type d \) 2>/dev/null | while IFS= read -r p; do
+  if [ ! -e "$p" ]; then echo "$p"; fi
+done)"
+if [ -n "$ALIAS_BROKEN" ]; then
+  echo "FATAL: .next/node_modules 下仍有无法解析的条目，拒绝继续部署："
+  echo "$ALIAS_BROKEN" | sed 's|^|  |'
+  echo "处置：确认 \$APP/node_modules 下存在对应真实包，或删除该悬空条目后重跑。"
+  exit 1
+fi
+echo "OK: 别名链接全部可解析（无悬空条目）"
+
+echo "=== [4c/7] schema 一致性检查（防「代码新、schema 旧」→ 走库接口 500）==="
+# 事故复盘（2026-09-22）：本脚本出于防覆盖生产库的考虑从不同步 prisma/，
+# 导致 V2 的 schema 变更（stage / stageActionCompleted / stageActionAt /
+# buyCountToday / sellCountToday / pool 共 6 列）长期未上服务器。部署新构建后
+# 所有走库接口报 `Unknown field stage for select statement`（500），
+# 且**重新 generate 也无效** —— 因为 Prisma Client 是照旧 schema 生成的。
+# 正确处置顺序：① 先给物理表 ADD COLUMN ② 同步 schema ③ 再 generate。
+# 包内 SCHEMA-MD5.txt / SCHEMA.prisma 由 pack-standalone.sh 写入。
+EXPECT_SCHEMA_MD5="$(cat "$TMP/SCHEMA-MD5.txt" 2>/dev/null | tr -d '[:space:]' || true)"
+CUR_SCHEMA_MD5="$(md5sum prisma/schema.prisma | cut -d' ' -f1)"
+SCHEMA_MISMATCH=0
+if [ -n "$EXPECT_SCHEMA_MD5" ] && [ "$EXPECT_SCHEMA_MD5" != "$CUR_SCHEMA_MD5" ]; then
+  SCHEMA_MISMATCH=1
+  echo "  ⚠️  线上 schema 与本次构建所用 schema 不一致！"
+  echo "     线上: $CUR_SCHEMA_MD5"
+  echo "     期望: $EXPECT_SCHEMA_MD5"
+  if [ "$WITH_SCHEMA" = "--with-schema" ] && [ -f "$TMP/SCHEMA.prisma" ]; then
+    cp -a prisma/schema.prisma "prisma/schema.prisma.bak-$TS"
+    cp -f "$TMP/SCHEMA.prisma" prisma/schema.prisma
+    echo "     已同步（旧 schema 已备份为 prisma/schema.prisma.bak-$TS）"
+    SCHEMA_MISMATCH=0
+  else
+    echo "     未同步（默认不覆盖生产 schema）。若新代码引用了线上缺失的字段，"
+    echo "     走库接口会 500。处置："
+    echo "       a) 先给物理表补列：python3 /home/ubuntu/deploy/migrate-simtrade-v2.py"
+    echo "       b) 再重跑本脚本并追加 --with-schema"
+  fi
+else
+  echo "  OK: schema 一致（$CUR_SCHEMA_MD5）"
 fi
 
 echo "=== [5/7] 重新生成 Prisma Client（规避跨平台引擎不匹配）==="
@@ -137,3 +267,6 @@ fi
 
 rm -rf "$TMP"
 echo "=== 部署完成（备份保留在 .next.pre-deploy-$TS）==="
+if [ "${SCHEMA_MISMATCH:-0}" = "1" ]; then
+  echo "⚠️  提醒：schema 未同步（见 [4c/7]）。若接口报 Unknown field ... 请按该处提示处置。"
+fi

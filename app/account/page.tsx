@@ -14,7 +14,7 @@ export const metadata = {
  */
 export default function AccountPage() {
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-6">
+    <div className="mx-auto w-full max-w-[1320px] px-4 py-6">
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight">模拟账户</h1>
         <p className="mt-1 text-sm text-muted-foreground">

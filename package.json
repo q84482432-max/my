@@ -13,6 +13,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "db:reset": "prisma db push --force-reset && npm run db:seed",
+    "db:refresh-meta": "tsx scripts/refreshStockMeta.ts",
     "import:dry": "tsx scripts/importMarketJson.ts --dry-run",
     "import:market": "tsx scripts/importMarketJson.ts --replace",
     "test:market": "tsx scripts/testMarketData.ts",
@@ -25,12 +26,14 @@
     "test:backtest": "tsx scripts/testBacktest.ts",
     "test:api": "tsx scripts/testApiRoutes.ts",
     "test:simTrade": "tsx scripts/testSimTrade.ts",
+    "test:intraday30m": "tsx scripts/testIntraday30m.ts",
     "test:simTradeUI": "node -e \"require('./runner.mjs').run('scripts/testSimTradeUI.ts')\"",
     "test:concurrency": "tsx scripts/testConcurrency.ts",
     "test:index": "tsx scripts/testIndexIsolation.ts",
+    "test:indexUI": "node -e \"require('./runner.mjs').run('scripts/testIndexUI.ts')\"",
     "browser:shot": "tsx scripts/browserVerify.ts shot",
     "browser": "tsx scripts/browserVerify.ts",
-    "test:all": "npm run test:market && npm run test:kline && npm run test:indicators && npm run test:chart && npm run test:trade && npm run test:account && npm run test:sim && npm run test:backtest && npm run test:simTrade && npm run test:concurrency && npm run test:index"
+    "test:all": "npm run test:market && npm run test:kline && npm run test:indicators && npm run test:chart && npm run test:trade && npm run test:account && npm run test:sim && npm run test:backtest && npm run test:simTrade && npm run test:intraday30m && npm run test:api && npm run test:simTradeUI && npm run test:concurrency && npm run test:index"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -51,8 +54,10 @@
     "dotenv": "^17.4.2",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
+    "hyparquet": "^1.31.1",
+    "hyparquet-compressors": "^1.1.2",
     "lucide-react": "^1.45.0",
-    "next": "^15.5.25",
+    "next": "^16.3.5",
     "prisma": "^6.19.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -14,9 +14,15 @@
  * 运行： npx tsx scripts/testKlineChartOption.ts
  */
 
-import { buildKlineOption, KLINE_UP_COLOR, KLINE_DOWN_COLOR } from "@/lib/klineChartOption";
+import {
+  buildKlineOption,
+  INDEX_LINE_COLOR,
+  KLINE_UP_COLOR,
+  KLINE_DOWN_COLOR,
+} from "@/lib/klineChartOption";
 import { getKlines, getStockInfoByCode } from "@/services/marketDataService";
 import type { KlineBar } from "@/types";
+import { CHART } from "@/lib/chartPalette";
 
 let passed = 0;
 let failed = 0;
@@ -187,9 +193,9 @@ async function main(): Promise<void> {
   const ap = tooltip.axisPointer as Record<string, unknown>;
   check("十字光标已启用（axisPointer.type = cross）", ap?.type === "cross", String(ap?.type));
   check(
-    "tooltip 采用浅底深字（符合浅色主题）",
-    String(tooltip.backgroundColor).includes("255, 255, 255") &&
-      (tooltip.textStyle as Record<string, string>).color === "#18181b"
+    "tooltip 采用深底浅字（符合深色主题）",
+    tooltip.backgroundColor === CHART.surface &&
+      (tooltip.textStyle as Record<string, string>).color === CHART.textPrimary
   );
 
   // tooltip 内容包含各项字段
@@ -273,6 +279,154 @@ async function main(): Promise<void> {
   check("单根数据可构建配置", (sSeries[0]?.data as unknown[]).length === 1);
   const sMa60 = sSeries.find((s) => s.name === "MA60")?.data as (number | null)[];
   check("单根数据下 MA60 为 null", sMa60.length === 1 && sMa60[0] === null);
+
+  /* ============================================================ */
+  section('9. 折线形态（chartType="line"，模拟炒股页的大盘参照用）');
+
+  const line = buildKlineOption({
+    bars: daily,
+    chartType: "line",
+    seriesName: "上证指数",
+    maPeriods: [5, 20],
+  });
+  const lSeries = asArray(line.series as unknown as Record<string, unknown>[]);
+  const lMain = lSeries[0];
+  const lLegend = ((line.legend as { data?: string[] })?.data ?? []).slice();
+
+  check("主体系列为折线（不是 candlestick）", lMain?.type === "line", String(lMain?.type));
+  check(
+    "折线数据 = 收盘价序列（逐点对齐、非 OHLC 数组）",
+    (lMain?.data as number[]).length === daily.length &&
+      (lMain?.data as number[])[0] === daily[0].close &&
+      typeof (lMain?.data as number[])[0] === "number",
+    `${(lMain?.data as number[]).length} 点，首点 ${(lMain?.data as number[])[0]}`,
+  );
+  check(
+    "折线使用中性蓝主线色（不与涨跌红绿混淆）",
+    (lMain?.lineStyle as { color?: string })?.color === INDEX_LINE_COLOR,
+  );
+  check(
+    "图例名取 seriesName（上证指数），不再是「K线」",
+    lLegend[0] === "上证指数" && !lLegend.includes("K线"),
+    lLegend.join(","),
+  );
+  check("折线形态仍保留均线", lLegend.includes("MA5") && lLegend.includes("MA20"), lLegend.join(","));
+  check("折线形态仍保留成交量副图", lSeries.some((s) => s.name === "成交量" && s.type === "bar"));
+  check("折线形态仍是双 grid（主图 + 量能）", asArray(line.grid as never).length === 2);
+  check("折线形态 xAxis 仍为 2 条", asArray(line.xAxis as never).length === 2);
+  check("折线形态 yAxis 仍为 2 条", asArray(line.yAxis as never).length === 2);
+  const lZoom = asArray(line.dataZoom as never)[0] as { xAxisIndex?: number[] } | undefined;
+  check(
+    "dataZoom 仍同时作用于主轴与量能轴（联动不丢）",
+    Array.isArray(lZoom?.xAxisIndex) &&
+      lZoom?.xAxisIndex[0] === 0 &&
+      lZoom?.xAxisIndex[1] === 1,
+    JSON.stringify(lZoom?.xAxisIndex),
+  );
+  const cSeries = asArray(
+    buildKlineOption({ bars: daily }).series as unknown as Record<string, unknown>[],
+  );
+  check("默认形态仍是 candlestick（未破坏既有行为）", cSeries[0]?.type === "candlestick");
+
+  /* ============================================================ */
+  section("10. 日内 30m：x 轴用时刻、均线可关闭（V3 阶段 2 新增）");
+
+  // 同一个交易日的 8 根 30m 棒：date 相同、time 递增 —— 日内图的真实形状。
+  // 这正是「x 轴若只取 date，8 根会塌成同一个类别」的复发场景。
+  const INTRADAY_TIMES = [
+    "10:00:00",
+    "10:30:00",
+    "11:00:00",
+    "11:30:00",
+    "13:30:00",
+    "14:00:00",
+    "14:30:00",
+    "15:00:00",
+  ];
+  const intradayBars: KlineBar[] = INTRADAY_TIMES.map((t, i) => ({
+    date: "2025-04-24",
+    time: t,
+    open: 10 + i,
+    high: 10.5 + i,
+    low: 9.5 + i,
+    close: 10.2 + i,
+    volume: 1000 * (i + 1),
+    amount: 10000 * (i + 1),
+  }));
+
+  const intraday = buildKlineOption({
+    bars: intradayBars,
+    showVolume: true,
+    maPeriods: [],
+    xAxisMode: "time",
+    zoomStart: 0,
+    zoomEnd: 100,
+  });
+  const iAxes = asArray(intraday.xAxis as never);
+  const iLabels = (iAxes[0] as { data?: string[] } | undefined)?.data ?? [];
+
+  check(
+    "xAxisMode='time' → x 轴为 8 个时刻",
+    iLabels.length === 8 && iLabels[0] === "10:00" && iLabels[7] === "15:00",
+    JSON.stringify(iLabels),
+  );
+  check(
+    "x 轴标签互不相同（category 轴不会把 8 根折成 1 根）",
+    new Set(iLabels).size === iLabels.length,
+    `unique=${new Set(iLabels).size}`,
+  );
+  check(
+    "量能副图 x 轴同样用时刻（主图/副图对齐）",
+    JSON.stringify(
+      (asArray(intraday.xAxis as never)[1] as { data?: string[] } | undefined)?.data,
+    ) === JSON.stringify(iLabels),
+  );
+  const iCandle = asArray(intraday.series as never)[0] as {
+    type?: string;
+    data?: unknown[];
+  };
+  check(
+    "蜡烛线仍为 8 根（未被裁剪）",
+    iCandle?.type === "candlestick" && (iCandle.data ?? []).length === 8,
+    `type=${iCandle?.type} n=${(iCandle.data ?? []).length}`,
+  );
+
+  // 默认行为不得被改变：不传 xAxisMode 时仍用交易日
+  const defaultAxis = buildKlineOption({ bars: daily, showVolume: true });
+  const dLabels =
+    (asArray(defaultAxis.xAxis as never)[0] as { data?: string[] } | undefined)?.data ?? [];
+  check(
+    "不传 xAxisMode 时 x 轴仍为交易日（默认行为未变）",
+    dLabels.length > 0 && dLabels.every((l) => /^\d{4}-\d{2}-\d{2}$/.test(l)),
+    `首=${dLabels[0]} 末=${dLabels[dLabels.length - 1]}`,
+  );
+
+  // 均线开关：undefined = 默认 MA_CONFIG；[] = 完全不画
+  const withMA = buildKlineOption({ bars: daily, showVolume: true });
+  const withoutMA = buildKlineOption({ bars: daily, showVolume: true, maPeriods: [] });
+  const maCount = (o: ReturnType<typeof buildKlineOption>) =>
+    asArray(o.series as never).filter((s) =>
+      /^MA\d+$/.test(String((s as { name?: string }).name ?? "")),
+    ).length;
+  const legendOf = (o: ReturnType<typeof buildKlineOption>) =>
+    (o.legend as { data?: string[] } | undefined)?.data ?? [];
+
+  check(
+    "maPeriods=[] → 不生成任何 MA 系列（日内 8 根不再出现空均线）",
+    maCount(withoutMA) === 0,
+    `MA 系列=${maCount(withoutMA)}`,
+  );
+  check(
+    "maPeriods=[] → 图例中也不再出现 MA 项",
+    legendOf(withoutMA).every((l) => !/^MA\d+$/.test(l)),
+    legendOf(withoutMA).join(","),
+  );
+  check(
+    "不传 maPeriods → 仍生成默认 4 条均线（未破坏既有行为）",
+    maCount(withMA) === 4,
+    `MA 系列=${maCount(withMA)}`,
+  );
+
 
   /* ============================================================ */
   console.log("\n" + "═".repeat(66));

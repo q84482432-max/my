@@ -4,6 +4,7 @@ import * as React from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import type { EquityPoint } from "@/types";
+import { CHART } from "@/lib/chartPalette";
 
 interface EquityChartProps {
   points: EquityPoint[];
@@ -28,25 +29,26 @@ export default function EquityChart({
 
     return {
       animation: false,
-      textStyle: { fontSize: 11 },
+      textStyle: { fontSize: 11, color: CHART.textMuted },
       tooltip: {
         trigger: "axis",
-        backgroundColor: "rgba(24, 24, 27, 0.92)",
-        borderWidth: 0,
-        textStyle: { color: "#fafafa", fontSize: 11 },
+        backgroundColor: CHART.surface,
+        borderColor: CHART.border,
+        borderWidth: 1,
+        textStyle: { color: CHART.textPrimary, fontSize: 11 },
         formatter: (params: unknown) => {
           const arr = params as { axisValue: string }[];
           if (!arr || arr.length === 0) return "";
           const p = points.find((x) => x.date === arr[0].axisValue);
           if (!p) return "";
-          const cls = p.returnPercent >= 0 ? "#ef4444" : "#22c55e";
+          const cls = p.returnPercent >= 0 ? CHART.loss : CHART.profit;
           const sign = p.returnPercent >= 0 ? "+" : "";
           return `
             <div style="min-width:150px">
-              <div style="font-weight:600;margin-bottom:6px">${p.date}</div>
-              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#a1a1aa">总资产</span><span>¥${p.totalAsset.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
-              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#a1a1aa">净值</span><span>${p.nav.toFixed(4)}</span></div>
-              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#a1a1aa">收益率</span><span style="color:${cls}">${sign}${p.returnPercent.toFixed(2)}%</span></div>
+              <div style="font-weight:600;margin-bottom:6px;color:${CHART.textPrimary}">${p.date}</div>
+              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${CHART.textMuted}">总资产</span><span>¥${p.totalAsset.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${CHART.textMuted}">净值</span><span>${p.nav.toFixed(4)}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${CHART.textMuted}">收益率</span><span style="color:${cls}">${sign}${p.returnPercent.toFixed(2)}%</span></div>
             </div>`;
         },
       },
@@ -56,15 +58,15 @@ export default function EquityChart({
         right: 10,
         itemWidth: 14,
         itemHeight: 8,
-        textStyle: { fontSize: 11 },
+        textStyle: { fontSize: 11, color: CHART.textMuted },
       },
       grid: { left: 62, right: 58, top: 28, bottom: 28 },
       xAxis: {
         type: "category",
         data: dates,
         boundaryGap: false,
-        axisLabel: { fontSize: 10, hideOverlap: true },
-        axisLine: { lineStyle: { color: "#a1a1aa" } },
+        axisLabel: { fontSize: 10, hideOverlap: true, color: CHART.textMuted },
+        axisLine: { lineStyle: { color: CHART.axisLine } },
         splitLine: { show: false },
       },
       yAxis: [
@@ -72,21 +74,22 @@ export default function EquityChart({
           type: "value",
           scale: true,
           name: "总资产",
-          nameTextStyle: { fontSize: 10 },
+          nameTextStyle: { fontSize: 10, color: CHART.textMuted },
           axisLabel: {
             fontSize: 10,
+            color: CHART.textMuted,
             formatter: (v: number) =>
               Math.abs(v) >= 1e4 ? `${(v / 1e4).toFixed(1)}万` : v.toFixed(0),
           },
-          splitLine: { lineStyle: { type: "dashed", opacity: 0.35 } },
+          splitLine: { lineStyle: { type: "dashed", color: CHART.splitLine, opacity: 0.35 } },
           axisLine: { show: false },
         },
         {
           type: "value",
           scale: true,
           name: "收益率%",
-          nameTextStyle: { fontSize: 10 },
-          axisLabel: { fontSize: 10, formatter: "{value}%" },
+          nameTextStyle: { fontSize: 10, color: CHART.textMuted },
+          axisLabel: { fontSize: 10, color: CHART.textMuted, formatter: "{value}%" },
           splitLine: { show: false },
           axisLine: { show: false },
         },
@@ -101,7 +104,7 @@ export default function EquityChart({
           data: points.map((p) => p.totalAsset),
           smooth: true,
           showSymbol: false,
-          lineStyle: { width: 1.6, color: "#3b82f6" },
+          lineStyle: { width: 1.6, color: CHART.equity },
           areaStyle: {
             color: {
               type: "linear",
@@ -110,8 +113,8 @@ export default function EquityChart({
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: "rgba(59,130,246,0.22)" },
-                { offset: 1, color: "rgba(59,130,246,0.02)" },
+                { offset: 0, color: "rgba(91, 147, 245, 0.22)" },
+                { offset: 1, color: "rgba(91, 147, 245, 0.02)" },
               ],
             },
           },
@@ -123,12 +126,12 @@ export default function EquityChart({
           data: ret,
           smooth: true,
           showSymbol: false,
-          lineStyle: { width: 1.6, color: "#f59e0b" },
+          lineStyle: { width: 1.6, color: CHART.benchmark },
           markLine: {
             silent: true,
             symbol: "none",
             data: [{ yAxis: 0 }],
-            lineStyle: { color: "#a1a1aa", type: "dashed", opacity: 0.6 },
+            lineStyle: { color: CHART.splitLine, type: "dashed", opacity: 0.6 },
             label: { show: false },
           },
         },

@@ -108,6 +108,11 @@ export async function GET(request: Request) {
         lastPrice: 0,
         change: 0,
         changePercent: 0,
+        /* 新增的 开/高/低 与 lastPrice 同源，缺失时同样给 0，
+           保持「空行情的所有价格字段都为 0」这一不变式（前端按 >0 判定显示 `--`）。 */
+        open: 0,
+        high: 0,
+        low: 0,
         volume: 0,
         amount: 0,
         prevClose: 0,

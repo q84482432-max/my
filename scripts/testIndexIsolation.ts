@@ -80,13 +80,33 @@ async function main() {
   // ---------------------------------------------------------------
   const stats = await getMarketStats();
   check("stockCount = 5558", stats.stockCount === 5558, `实际 ${stats.stockCount}`);
-  check("klineCount = 2379962", stats.klineCount === 2379962, `实际 ${stats.klineCount}`);
+  // klineCount 写死数字会在每次数据更新后误报（2026-09-20 改）：改为与 klines 表实际行数交叉校验 ——
+  // 这同时更强地守住了本条断言的意图：**指数若混入个股统计，这里会立刻不等**。
+  const dbKlineCount = await prisma.kline.count();
+  check(
+    "个股 klineCount = klines 表实际行数（指数未混入个股统计）",
+    stats.klineCount === dbKlineCount && stats.klineCount >= 2_000_000,
+    `stats ${stats.klineCount.toLocaleString()} vs DB ${dbKlineCount.toLocaleString()}`,
+  );
   check(
     "个股数据窗口仍为 2024-11-04",
     stats.startDate === "2024-11-04",
     `实际 ${stats.startDate}`,
   );
-  check("个股数据窗口末端 = 2026-09-18", stats.endDate === "2026-09-18", `实际 ${stats.endDate}`);
+  // 写死日期会在每次数据更新后误报（2026-09-22 改）：改为与 klines 表实际最新交易日交叉校验 ——
+  // 意图仍是「窗口覆盖到最新交易日」，且若个股统计被指数污染（指数历史到 2006 年），此处会立刻不等。
+  const latestKlineRow = await prisma.kline.findFirst({
+    orderBy: { tradeDate: "desc" },
+    select: { tradeDate: true },
+  });
+  const dbLatestStockDate = latestKlineRow
+    ? new Date(latestKlineRow.tradeDate).toISOString().slice(0, 10)
+    : "";
+  check(
+    "个股数据窗口末端 = klines 表实际最新交易日",
+    stats.endDate === dbLatestStockDate,
+    `stats ${stats.endDate} vs DB ${dbLatestStockDate}`,
+  );
 
   const boardSum = Object.values(stats.byBoard).reduce((a, b) => a + b, 0);
   check(
@@ -169,18 +189,72 @@ async function main() {
   check("指数代码全部带交易所前缀", indices.every((i) => isIndexCode(i.code)));
 
   const idxStats = await getIndexStats();
-  check("指数 K 线总数 = 34558", idxStats.barCount === 34558, `实际 ${idxStats.barCount}`);
+  // 同 2026-09-20 对个股 klineCount 的处理（见上）：写死数字会在每次数据更新后误报，
+  // 改为与 index_klines 表实际行数交叉校验 —— 意图（统计正确、未混入个股）不变且更稳。
+  const dbIndexKlineCount = await prisma.indexKline.count();
+  check(
+    "指数 K 线总数 = index_klines 表实际行数",
+    idxStats.barCount === dbIndexKlineCount,
+    `stats ${idxStats.barCount} vs DB ${dbIndexKlineCount}`,
+  );
   check("指数最早日 = 2006-03-01", idxStats.startDate === "2006-03-01", `实际 ${idxStats.startDate}`);
-  check("指数最新日 = 2026-09-18", idxStats.endDate === "2026-09-18", `实际 ${idxStats.endDate}`);
+  const latestIdxRow = await prisma.indexKline.findFirst({
+    orderBy: { tradeDate: "desc" },
+    select: { tradeDate: true },
+  });
+  const dbLatestIndexDate = latestIdxRow
+    ? new Date(latestIdxRow.tradeDate).toISOString().slice(0, 10)
+    : "";
+  check(
+    "指数最新日 = index_klines 表实际最新交易日",
+    idxStats.endDate === dbLatestIndexDate,
+    `stats ${idxStats.endDate} vs DB ${dbLatestIndexDate}`,
+  );
 
   const sh = await getIndexInfo("sh000001");
   check("sh000001 = 上证指数", sh?.name === "上证指数", `实际 ${sh?.name}`);
-  check("上证指数 barCount = 5000", sh?.barCount === 5000, `实际 ${sh?.barCount}`);
+
+  // 元信息 barCount 必须等于该指数在 index_klines 中的实际行数（冗余列漂移即失败）
+  const shIdxRow = await prisma.marketIndex.findUnique({
+    where: { code: "sh000001" },
+    select: { id: true },
+  });
+  const shDbCount = shIdxRow
+    ? await prisma.indexKline.count({ where: { indexId: shIdxRow.id } })
+    : -1;
+  check(
+    "上证指数 barCount = 该指数 index_klines 实际行数",
+    sh?.barCount === shDbCount,
+    `元信息 ${sh?.barCount} vs DB ${shDbCount}`,
+  );
 
   const bars = await getIndexKlines("sh000001");
-  check("getIndexKlines('sh000001') 返回 5000 根", bars.length === 5000, `实际 ${bars.length}`);
+  // 默认返回该指数最早的 N 根（上限 5000），故末根 = DB 升序第 5000 个交易日。
+  // 写死 "5000 根 / 末根 2026-09-18" 会随数据增长而误报（2026-09-22 改），此处与 DB 交叉校验。
+  const DEFAULT_BAR_LIMIT = 5000;
+  const kAtLimit = shIdxRow
+    ? await prisma.indexKline.findMany({
+        where: { indexId: shIdxRow.id },
+        orderBy: { tradeDate: "asc" },
+        take: DEFAULT_BAR_LIMIT,
+        select: { tradeDate: true },
+      })
+    : [];
+  const dateAtLimit = kAtLimit.length
+    ? new Date(kAtLimit[kAtLimit.length - 1].tradeDate).toISOString().slice(0, 10)
+    : "";
+  const expectBars = Math.min(shDbCount, DEFAULT_BAR_LIMIT);
+  check(
+    "getIndexKlines('sh000001') 返回 min(实计, 默认上限 5000) 根",
+    bars.length === expectBars,
+    `实际 ${bars.length} vs 期望 ${expectBars}`,
+  );
   check("首根日期 = 2006-03-01", bars[0]?.date === "2006-03-01", `实际 ${bars[0]?.date}`);
-  check("末根日期 = 2026-09-18", bars[bars.length - 1]?.date === "2026-09-18");
+  check(
+    "末根日期 = 该指数第 5000 个交易日（默认上限处）",
+    bars[bars.length - 1]?.date === dateAtLimit,
+    `实际 ${bars[bars.length - 1]?.date} vs DB ${dateAtLimit}`,
+  );
   check("升序排列", bars.every((b, i) => i === 0 || bars[i - 1].date < b.date));
   check(
     "价格为正且 high >= low",

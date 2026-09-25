@@ -1,19 +1,107 @@
 /**
- * API 与页面集成测试（需先启动服务）
+ * API 与页面集成测试
  *
  * 覆盖：股票列表 API（分页/筛选/搜索）、行情字段完整性、复权口径正确性、
  *       日K/周K/月K 接口、市场概览全市场覆盖、页面 SSR 输出。
  *
- * 运行：
- *   npm run build && npx next start -p 3111     # 另开终端
- *   npm run test:api                            # 默认 http://127.0.0.1:3111
+ * 运行方式（**自起服务**，可独立进 `test:all` 闸门）：
+ *   npm run test:api
+ *     → 若 `.next` 已有构建产物，脚本会自己拉起 `next start -p 3111`，
+ *       跑完自动关掉；因此不再需要「另开一个终端先起服务」。
  *   BASE_URL=http://127.0.0.1:3000 npm run test:api
+ *     → 显式指定外部服务时，脚本**只复用、不代管**（不会去杀别人的进程）。
+ *
+ * 前置：需要先 `npm run build`（无构建产物时会给出明确提示而不是伪装成网络错误）。
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
 const BASE = process.env.BASE_URL ?? "http://127.0.0.1:3111";
+const MANAGED_PORT = 3111;
 let pass = 0;
 let fail = 0;
 const bad: string[] = [];
+
+/** 脚本自己拉起并被本进程管理的服务（非 BASE_URL 外部服务时才非空） */
+let managedChild: ChildProcess | null = null;
+
+function stopManagedServer(): void {
+  if (managedChild && !managedChild.killed) {
+    try {
+      managedChild.kill();
+    } catch {
+      /* 忽略：清理失败不应影响测试结论 */
+    }
+    managedChild = null;
+  }
+}
+
+async function reachable(url: string): Promise<boolean> {
+  try {
+    const r = await fetch(url + "/api/market?limit=1");
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 保证有可用服务：优先复用，其次自起。
+ *
+ * 自起而不复用外部服务是有意为之 —— `test:all` 里没有第二个终端，
+ * 让脚本自己管服务，闸门才真正可复现；跑完（含异常退出）都会清理。
+ */
+async function ensureServer(): Promise<void> {
+  if (await reachable(BASE)) {
+    console.log(`\x1b[90m复用已运行的服务：${BASE}\x1b[0m`);
+    return;
+  }
+
+  if (process.env.BASE_URL) {
+    console.error(
+      `\n\x1b[31m无法连接 ${BASE}（BASE_URL 显式指定，脚本不会代管外部服务）。\x1b[0m`,
+    );
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(path.join(process.cwd(), ".next", "BUILD_ID"))) {
+    console.error(
+      "\n\x1b[31m未找到 .next 构建产物，无法自起服务。请先执行：\x1b[0m\n  npm run build\n",
+    );
+    process.exit(1);
+  }
+
+  const nextBin = path.join(process.cwd(), "node_modules", "next", "dist", "bin", "next");
+  console.log(`\x1b[90m自起服务：next start -p ${MANAGED_PORT} …\x1b[0m`);
+  managedChild = spawn(process.execPath, [nextBin, "start", "-p", String(MANAGED_PORT)], {
+    stdio: "ignore",
+    env: { ...process.env, PORT: String(MANAGED_PORT) },
+  });
+  managedChild.on("exit", () => {
+    managedChild = null;
+  });
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (await reachable(BASE)) {
+      console.log("\x1b[90m服务已就绪\x1b[0m");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  console.error(`\n\x1b[31m自起服务在 60s 内未就绪：${BASE}\x1b[0m`);
+  stopManagedServer();
+  process.exit(1);
+}
+
+process.on("exit", stopManagedServer);
+process.on("SIGINT", () => {
+  stopManagedServer();
+  process.exit(130);
+});
 
 function ck(n: string, c: boolean, d?: string): void {
   if (c) {
@@ -34,15 +122,7 @@ async function get(p: string): Promise<any> {
 async function main(): Promise<void> {
   console.log(`\n\x1b[1mAPI 集成测试\x1b[0m  \x1b[90m${BASE}\x1b[0m`);
 
-  try {
-    await fetch(BASE + "/api/market?limit=1");
-  } catch {
-    console.error(
-      `\n\x1b[31m无法连接 ${BASE}。请先启动服务：\x1b[0m\n` +
-        `  npm run build && npx next start -p 3111\n`
-    );
-    process.exit(1);
-  }
+  await ensureServer();
 
   console.log("\n\x1b[1m列表 API\x1b[0m");
   const l = await get("/api/stocks?page=1&pageSize=5&withQuote=true");
@@ -138,7 +218,12 @@ async function main(): Promise<void> {
       ? `\x1b[32m✔ 全部通过：${pass}/${pass + fail}\x1b[0m`
       : `\x1b[31m✗ 失败 ${fail}/${pass + fail}: ${bad.join(" | ")}\x1b[0m`,
   );
+  stopManagedServer();
   process.exit(fail === 0 ? 0 : 1);
 }
 
-main();
+main().catch((err) => {
+  console.error("\n\x1b[31m测试执行异常:\x1b[0m", err);
+  stopManagedServer();
+  process.exit(1);
+});

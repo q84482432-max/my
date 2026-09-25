@@ -15,32 +15,34 @@
 
 import type { EChartsOption } from "echarts";
 import type { BacktestDrawdownPoint, BacktestEquityPoint } from "@/types";
+import { CHART } from "@/lib/chartPalette";
 
-/** K线同款涨跌色 */
-const UP_COLOR = "hsl(0, 84%, 50%)"; // 涨 / 盈利 → 红
-const DOWN_COLOR = "hsl(142, 71%, 40%)"; // 跌 / 亏损 → 绿
-const NEUTRAL_COLOR = "#a1a1aa";
-const BENCH_COLOR = "#f59e0b";
+/** K线同款涨跌色（深底上略提亮，A股涨红跌绿） */
+const UP_COLOR = CHART.up;
+const DOWN_COLOR = CHART.down;
+/** 初始资金参考线：中性灰 */
+const NEUTRAL_COLOR = CHART.textMuted;
+const BENCH_COLOR = CHART.benchmark;
 
-const AXIS_LABEL = { fontSize: 10, color: "#71717a" };
-const AXIS_LINE = { lineStyle: { color: "#d4d4d8" } };
+const AXIS_LABEL = { fontSize: 10, color: CHART.textMuted };
+const AXIS_LINE = { lineStyle: { color: CHART.axisLine } };
 
-/** 统一的浅色主题 tooltip（与 K 线图一致） */
+/** 统一的深色主题 tooltip（深底浅字，与 K 线图一致） */
 function lightTooltip(formatter: (params: unknown) => string) {
   return {
     trigger: "axis" as const,
-    backgroundColor: "rgba(255, 255, 255, 0.98)",
-    borderColor: "#e4e4e7",
+    backgroundColor: CHART.surface,
+    borderColor: CHART.border,
     borderWidth: 1,
     padding: 10,
-    textStyle: { color: "#18181b", fontSize: 11 },
-    extraCssText: "box-shadow: 0 4px 16px rgba(0,0,0,0.12); border-radius: 6px;",
+    textStyle: { color: CHART.textPrimary, fontSize: 11 },
+    extraCssText: "box-shadow: 0 4px 16px rgba(0,0,0,0.45); border-radius: 6px;",
     formatter,
   };
 }
 
 function rowHtml(label: string, value: string, color?: string): string {
-  return `<div style="display:flex;justify-content:space-between;gap:16px;line-height:1.7"><span style="color:#71717a">${label}</span><span style="color:${color ?? "#18181b"}">${value}</span></div>`;
+  return `<div style="display:flex;justify-content:space-between;gap:16px;line-height:1.7"><span style="color:${CHART.textMuted}">${label}</span><span style="color:${color ?? CHART.textPrimary}">${value}</span></div>`;
 }
 
 export interface BuildEquityOptionInput {
@@ -79,17 +81,17 @@ export function buildBacktestEquityOption({
 
   return {
     animation: false,
-    textStyle: { fontSize: 11, color: "#3f3f46" },
+    textStyle: { fontSize: 11, color: CHART.textMuted },
     tooltip: lightTooltip((params) => {
       const arr = params as { dataIndex: number }[];
       if (!arr || arr.length === 0) return "";
       const p = points[arr[0].dataIndex];
       if (!p) return "";
-      const cls = p.totalAsset >= initialCash ? "#dc2626" : "#16a34a";
+      const cls = p.totalAsset >= initialCash ? CHART.up : CHART.down;
       const sign = p.returnPercent >= 0 ? "+" : "";
       return `
         <div style="min-width:190px">
-          <div style="font-weight:600;margin-bottom:6px;color:#18181b">${p.date}</div>
+          <div style="font-weight:600;margin-bottom:6px;color:${CHART.textPrimary}">${p.date}</div>
           ${rowHtml("收盘价", p.close.toFixed(2))}
           ${rowHtml("现金", `¥${p.cash.toFixed(2)}`)}
           ${rowHtml("持仓", `${p.positionQty} 股`)}
@@ -105,7 +107,7 @@ export function buildBacktestEquityOption({
       right: 10,
       itemWidth: 14,
       itemHeight: 8,
-      textStyle: { fontSize: 11, color: "#52525b" },
+      textStyle: { fontSize: 11, color: CHART.textMuted },
     },
     grid: { left: 66, right: 60, top: 30, bottom: 46 },
     xAxis: {
@@ -121,20 +123,20 @@ export function buildBacktestEquityOption({
         type: "value",
         scale: true,
         name: "总资产",
-        nameTextStyle: { fontSize: 10, color: "#71717a" },
+        nameTextStyle: { fontSize: 10, color: CHART.textMuted },
         axisLabel: {
           ...AXIS_LABEL,
           formatter: (v: number) =>
             Math.abs(v) >= 1e4 ? `${(v / 1e4).toFixed(1)}万` : v.toFixed(0),
         },
-        splitLine: { lineStyle: { type: "dashed", color: "#e4e4e7" } },
+        splitLine: { lineStyle: { type: "dashed", color: CHART.splitLine } },
         axisLine: { show: false },
       },
       {
         type: "value",
         scale: true,
         name: "收益率%",
-        nameTextStyle: { fontSize: 10, color: "#71717a" },
+        nameTextStyle: { fontSize: 10, color: CHART.textMuted },
         axisLabel: { ...AXIS_LABEL, formatter: "{value}%" },
         splitLine: { show: false },
         axisLine: { show: false },
@@ -149,10 +151,10 @@ export function buildBacktestEquityOption({
         start: 0,
         end: 100,
         borderColor: "transparent",
-        backgroundColor: "#f4f4f5",
-        fillerColor: "rgba(24, 24, 27, 0.08)",
-        handleStyle: { color: "#a1a1aa" },
-        textStyle: { fontSize: 10, color: "#71717a" },
+        backgroundColor: CHART.surfaceAlt,
+        fillerColor: "rgba(21, 26, 33, 0.5)",
+        handleStyle: { color: CHART.textFaint },
+        textStyle: { fontSize: 10, color: CHART.textMuted },
       },
     ],
     series: [
@@ -162,7 +164,7 @@ export function buildBacktestEquityOption({
         data: assets,
         smooth: false,
         showSymbol: false,
-        lineStyle: { width: 1.6, color: "#2563eb" },
+        lineStyle: { width: 1.6, color: CHART.equity },
         areaStyle: {
           color: {
             type: "linear",
@@ -171,8 +173,8 @@ export function buildBacktestEquityOption({
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: "rgba(37,99,235,0.20)" },
-              { offset: 1, color: "rgba(37,99,235,0.02)" },
+              { offset: 0, color: "rgba(91, 147, 245, 0.20)" },
+              { offset: 1, color: "rgba(91, 147, 245, 0.02)" },
             ],
           },
         },
@@ -198,7 +200,7 @@ export function buildBacktestEquityOption({
         data: rets,
         smooth: false,
         showSymbol: false,
-        lineStyle: { width: 1.4, color: "#f43f5e" },
+        lineStyle: { width: 1.4, color: CHART.loss },
       },
     ],
   } as EChartsOption;
@@ -219,7 +221,7 @@ export function buildBacktestDrawdownOption({
 
   return {
     animation: false,
-    textStyle: { fontSize: 11, color: "#3f3f46" },
+    textStyle: { fontSize: 11, color: CHART.textMuted },
     tooltip: lightTooltip((params) => {
       const arr = params as { dataIndex: number }[];
       if (!arr || arr.length === 0) return "";
@@ -227,7 +229,7 @@ export function buildBacktestDrawdownOption({
       if (!p) return "";
       return `
         <div style="min-width:180px">
-          <div style="font-weight:600;margin-bottom:6px;color:#18181b">${p.date}</div>
+          <div style="font-weight:600;margin-bottom:6px;color:${CHART.textPrimary}">${p.date}</div>
           ${rowHtml("总资产", `¥${p.totalAsset.toFixed(2)}`)}
           ${rowHtml("运行峰值", `¥${p.peak.toFixed(2)}`)}
           ${rowHtml("回撤", `${p.drawdownPercent.toFixed(2)}%`, DOWN_COLOR)}
@@ -247,7 +249,7 @@ export function buildBacktestDrawdownOption({
       // 回撤恒 ≤ 0，纵轴上限锁 0
       max: 0,
       axisLabel: { ...AXIS_LABEL, formatter: "{value}%" },
-      splitLine: { lineStyle: { type: "dashed", color: "#e4e4e7" } },
+      splitLine: { lineStyle: { type: "dashed", color: CHART.splitLine } },
       axisLine: { show: false },
     },
     dataZoom: [{ type: "inside", start: 0, end: 100 }],
@@ -259,7 +261,7 @@ export function buildBacktestDrawdownOption({
         smooth: false,
         showSymbol: false,
         lineStyle: { width: 1.4, color: DOWN_COLOR },
-        areaStyle: { color: "rgba(22,163,74,0.16)" },
+        areaStyle: { color: "rgba(47, 184, 119, 0.16)" },
         markLine: {
           silent: true,
           symbol: "none",
@@ -270,7 +272,7 @@ export function buildBacktestDrawdownOption({
               label: {
                 formatter: `最大回撤 ${low.toFixed(2)}%${lowDate ? ` (${lowDate})` : ""}`,
                 fontSize: 9,
-                color: "#15803d",
+                color: CHART.profit,
                 position: "insideEndBottom" as const,
               },
             },

@@ -48,6 +48,45 @@ const aliasPlugin = {
     b.onResolve({ filter: /^@\// }, (args) => {
       return { path: resolveAlias(args.path) };
     });
+
+    /**
+     * Next 的子路径导入（next/link、next/navigation …）补 `.js` 扩展名。
+     *
+     * 为什么需要：`packages: "external"` 让这些 import 原样留给 Node 解析，
+     * 而 Next 只在自己的 package.json `exports` 里声明了无扩展名映射 ——
+     * 那是打包器（webpack/turbopack）的特性，Node 的 ESM 解析器不认，
+     * 会报 ERR_MODULE_NOT_FOUND 并提示 "Did you mean next/link.js?"。
+     * 组件里一旦 import 了 next/link，SSR 渲染测试就会撞上这个问题。
+     */
+    b.onResolve({ filter: /^next\// }, (args) => {
+      if (/\.[cm]?js$/.test(args.path)) return null; // 已带扩展名，走默认解析
+      return { path: `${args.path}.js`, external: true };
+    });
+
+    /**
+     * 图表替身：把 `echarts-for-react` 换成一个无副作用占位组件。
+     *
+     * 两个原因，缺一不可：
+     *  1. SSR 下 echarts 渲染不出任何实质内容（它需要 DOM/canvas），
+     *     测试断言不了图表内部，渲染它只有成本没有收益；
+     *  2. `echarts-for-react` 是 CJS 包，在 Node 的 ESM 加载下 default 导出
+     *     可能变成 `{ __esModule, default }` 对象，被 React 当成非法元素类型
+     *     并抛 "Element type is invalid ... but got: object"，让整个树渲染失败。
+     *
+     * 替身仍会渲染一个带标记的空 div，因此「图表容器确实被挂载」这一点
+     * 依然可断言（见 scripts/testIndexUI.ts 的 data-testid 检查）。
+     */
+    b.onResolve({ filter: /^echarts-for-react$/ }, () => ({
+      path: "echarts-for-react-stub",
+      namespace: "test-stub",
+    }));
+    b.onLoad({ filter: /.*/, namespace: "test-stub" }, () => ({
+      contents:
+        'export default function ChartStub() { return <div data-testid="kline-chart-stub" />; }',
+      loader: "jsx",
+      // 必须给 resolveDir，否则 esbuild 无法从虚拟模块里解析 react/jsx-runtime
+      resolveDir: ROOT,
+    }));
   },
 };
 
@@ -70,6 +109,9 @@ export async function run(target, args = []) {
     platform: "node",
     target: "node20",
     format: "esm", // 输出 ESM，配合动态 import 执行
+    // 与 Next.js 一致的自动 JSX runtime：组件文件按 Next 习惯**不 import React**，
+    // 若用 esbuild 默认的经典转换会编译成 React.createElement 并报 "React is not defined"。
+    jsx: "automatic",
     write: false,
     packages: "external",
     plugins: [aliasPlugin],

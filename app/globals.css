@@ -68,6 +68,11 @@
     --dn-graphic: #18a05c; /* K线 / 图例 · 3.38:1（图形元素 ≥3:1 即可） */
     --up-bg: #fdeded; /* 涨幅 chip 底（文字于其上 5.03:1） */
     --dn-bg: #eaf7f0; /* 跌幅 chip 底（文字于其上 4.61:1） */
+    /* chip 描边：由 chip 底色与语义色混合得到。浅色下是「深色描边」，
+       深色下必须是「浅色描边」—— 因此不能写字面量，必须随主题走，
+       否则深色下会出现「深红字 + 深红底 + 深红边」糊成一团。 */
+    --up-border: #f3c9c9;
+    --dn-border: #c4e7d5;
 
     /* ── 圆角与投影（§6.2）──
        圆角提到 12px 后投影同步收敛：大圆角 + 重投影是廉价感的常见来源。 */
@@ -75,6 +80,13 @@
     --sh1: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
     --sh2: 0 6px 18px rgba(16, 24, 40, 0.09);
     --sh3: 0 16px 40px rgba(16, 24, 40, 0.16);
+
+    /* ── 底部 tab bar 高度（移动端）──
+       单列一个变量是必要的：模拟交易页**另有一个固定在底部的交易操作栏**，
+       两者必须堆叠（tab bar 在最底、交易栏上移其高度），否则会互相遮挡。
+       任何一处改了高度却漏改另一处，就会出现「买入按钮被 tab bar 盖住」——
+       把高度收成一个变量可以消除这类漂移。 */
+    --tabbar-h: 3.5rem;
   }
 
   /* 深色模式当前无切换入口（§7.4 待决事项 1），此处补齐令牌以保证
@@ -113,6 +125,9 @@
     --dn-graphic: #35c07c;
     --up-bg: #2a1618;
     --dn-bg: #10251b;
+    /* 深色下 chip 描边用「提亮后的同色系」，保证在深底上有可见边界 */
+    --up-border: #5c2a2c;
+    --dn-border: #1d4433;
   }
 }
 
@@ -128,6 +143,10 @@
       -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
     -webkit-text-size-adjust: 100%;
+    /* 全站深色（2026-09-23 切换）：`color-scheme` 让**原生控件**（滚动条、
+       输入框、下拉、日期选择器）跟随深色，否则深色页面上会出现亮白滚动条与白底输入框，
+       这类「系统级白块」是最常见的深色主题穿帮点。 */
+    color-scheme: dark;
   }
 
   body {
@@ -180,7 +199,9 @@
     padding: 34px 20px;
     border: 1px dashed var(--border-strong);
     border-radius: 12px;
-    background: linear-gradient(180deg, #fbfdff, #f4f8fd);
+    /* 原为写死的浅色渐变 (#fbfdff → #f4f8fd)，深色主题下会变成一块刺眼白斑。
+       改用 L2 分区面令牌，随主题自动深浅。 */
+    background: var(--surface-subtle);
     color: var(--t2);
     font-size: 13.5px;
   }
@@ -201,12 +222,12 @@
   .chip-up {
     color: hsl(var(--stock-up));
     background: var(--up-bg);
-    border: 1px solid #f3c9c9;
+    border: 1px solid var(--up-border);
   }
   .chip-dn {
     color: hsl(var(--stock-down));
     background: var(--dn-bg);
-    border: 1px solid #c4e7d5;
+    border: 1px solid var(--dn-border);
   }
   .chip-flat {
     color: var(--t3);

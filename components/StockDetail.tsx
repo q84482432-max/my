@@ -170,15 +170,45 @@ export default function StockDetail({
             <Badge variant="secondary">{BOARD_LABELS[stock.board]}</Badge>
           </div>
           {quote && (
-            <div className="flex flex-wrap items-baseline gap-4">
-              <span className={cn("text-3xl font-semibold tabular", changeClass)}>
-                {formatNumber(quote.lastPrice, 2)}
-              </span>
-              <span className={cn("text-base tabular", changeClass)}>
-                {changeSign}
-                {formatNumber(quote.change, 2)} ({changeSign}
-                {formatNumber(quote.changePercent, 2)}%)
-              </span>
+            <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
+              {/* 左：最新价（大字）+ 涨跌额 / 涨跌幅 */}
+              <div className="flex flex-wrap items-baseline gap-4">
+                <span className={cn("text-3xl font-semibold tabular", changeClass)}>
+                  {formatNumber(quote.lastPrice, 2)}
+                </span>
+                <span className={cn("text-base tabular", changeClass)}>
+                  {changeSign}
+                  {formatNumber(quote.change, 2)} ({changeSign}
+                  {formatNumber(quote.changePercent, 2)}%)
+                </span>
+              </div>
+
+              {/* 右：高 / 低 / 开（顺序与用户给出的案例图一致）
+                  按「与前收比较」着色 —— 行情软件惯例，能让用户一眼看出
+                  当日是跳空高开还是低开。无前收数据时退化为中性色。 */}
+              <div className="grid w-[92px] shrink-0 grid-cols-1 gap-y-0.5 text-xs">
+                {(
+                  [
+                    ["高", quote.high],
+                    ["低", quote.low],
+                    ["开", quote.open],
+                  ] as const
+                ).map(([label, v]) => (
+                  <div key={label} className="flex items-baseline justify-between gap-3">
+                    <span className="text-muted-foreground">{label}</span>
+                    <span
+                      className={cn(
+                        "tabular font-medium",
+                        v > 0 && quote.prevClose > 0
+                          ? pnlColorClass(v - quote.prevClose)
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {v > 0 ? formatNumber(v, 2) : "--"}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {quote && (

@@ -102,10 +102,20 @@ async function main(): Promise<void> {
     stats.fullWindowCount === 4782,
     `实得 ${stats.fullWindowCount}`
   );
+  // 起点是数据契约（导入范围固定），末端随每日增量更新前移 —— 末端写死会在每次数据更新后误报，
+  // 故与 klines 表实际最新交易日交叉校验（2026-09-20 改）。
+  const dbLastDate = await prisma.kline
+    .findFirst({ orderBy: { tradeDate: "desc" }, select: { tradeDate: true } })
+    .then((r) => (r ? toDateStr(r.tradeDate) : ""));
   check(
-    "K 线日期区间覆盖 20241104 ~ 20260910",
-    stats.startDate === "2024-11-04" && stats.endDate === "2026-09-10",
-    `${stats.startDate} ~ ${stats.endDate}`
+    "K 线日期区间起点 = 2024-11-04（数据契约）",
+    stats.startDate === "2024-11-04" && dbLastDate > "2024-11-04",
+    `${stats.startDate}（库内最新 ${dbLastDate}）`
+  );
+  check(
+    "K 线区间末端 = 库内最新交易日（跨层交叉校验）",
+    stats.endDate === dbLastDate,
+    `stats ${stats.endDate} vs DB ${dbLastDate}`
   );
 
   /* ============================================================ */
@@ -191,15 +201,24 @@ async function main(): Promise<void> {
       typeof maotai.fullWindow === "boolean",
       String(maotai.fullWindow)
     );
+    // 原先写死 "barCount=255 / windowEnd=2026-09-10"（源索引快照值），数据一更新就误报，
+    // 且与上面「元数据 vs 数据库」的交叉校验口径不一致（2026-09-20 改为交叉校验）：
+    // 元信息是缓存、日K是事实，两者必须自洽。
+    const maotaiBars = await getKline("600519", {
+      period: "1d",
+      adjust: maotai.adjust,
+      limit: 5000,
+    });
     check(
-      "barCount 与源索引 bars 一致（600519 = 255，源自 2025-08-25）",
-      maotai.barCount === 255,
-      `barCount=${maotai.barCount} 窗口 ${maotai.windowStart}~${maotai.windowEnd}`
+      "barCount = 该股日K实取根数（元信息 vs 数据交叉校验）",
+      maotai.barCount === maotaiBars.length,
+      `barCount=${maotai.barCount} vs 实取 ${maotaiBars.length}`
     );
     check(
-      "windowStart/windowEnd 与源索引一致（2025-08-25 ~ 2026-09-10）",
-      maotai.windowStart === "2025-08-25" && maotai.windowEnd === "2026-09-10",
-      `${maotai.windowStart} ~ ${maotai.windowEnd}`
+      "windowStart/windowEnd = 日K实取首末交易日",
+      maotai.windowStart === maotaiBars[0]?.date &&
+        maotai.windowEnd === maotaiBars[maotaiBars.length - 1]?.date,
+      `${maotai.windowStart} ~ ${maotai.windowEnd} vs 实取 ${maotaiBars[0]?.date} ~ ${maotaiBars[maotaiBars.length - 1]?.date}`
     );
     console.log(
       `    元信息: ${maotai.name}(${maotai.code}) ${maotai.board}/${maotai.exchange} ` +

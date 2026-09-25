@@ -12,6 +12,13 @@ Environment=PORT=8080
 Environment=HOSTNAME=0.0.0.0
 Environment=DATABASE_URL=file:./dev.db
 Environment=NODE_OPTIONS=--max-old-space-size=768
+# V3：30 分钟 K 线数据集目录（每只票一个 <code>.parquet，由 hyparquet 读取）。
+# 不设此项时 lib/intraday30m.ts 会退化为 `D:\AStockData/minutes_30` 这种
+# 「含 Windows 盘符的字面路径」，在 Linux 上必然不存在 → /api/intraday 永远取不到数据、
+# 成交价退化为日K 口径。因此本项是 V3 线上可用的**前提**。
+Environment=INTRADAY_30M_DIR=/home/ubuntu/minutes_30
+# 污染标记文件（默认取 ASTOCK_DATA_ROOT/metadata/contaminated_days.json，此处显式指定）
+Environment=CONTAMINATED_DAYS_FILE=/home/ubuntu/minutes_30_meta/contaminated_days.json
 ExecStart=/usr/local/bin/node /home/ubuntu/app/node_modules/next/dist/bin/next start -p 8080 -H 0.0.0.0
 Restart=always
 RestartSec=5

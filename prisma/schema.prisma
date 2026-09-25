@@ -147,7 +147,57 @@ model SimTradeSession {
   /// 当前模拟交易日（行情可见上界），始终是真实交易日
   currentDate DateTime
   /// 已确认操作（收盘结算）的交易日；等于 currentDate 时表示「当日已确认、待进入下一交易日」
+  /// V2 起语义收窄为「收盘阶段已完成」的标记（阶段推进以 `stage` 为准）
   confirmedDate DateTime?
+
+  /* ---------------- V2 阶段状态机（每日拆为「开盘阶段 + 收盘阶段」两个交易阶段） ---------------- */
+
+  /// 当前交易阶段（服务端唯一权威，客户端不可干预）：
+  ///   OPEN            开盘阶段（按当日开盘价成交）
+  ///   OPEN_CONFIRMED  开盘阶段已完成 1 次有效操作，等待进入收盘
+  ///   CLOSE_ANIMATION 收盘动画播放中（服务端已锁定，客户端仅展示）
+  ///   CLOSE           收盘阶段（已公布收盘价，按收盘价成交）
+  ///   CLOSE_CONFIRMED 收盘阶段已完成 1 次有效操作，等待当日结算
+  ///   DAY_SETTLED     当日结算完成，可进入下一交易日
+  stage String @default("OPEN")
+  /// 本阶段是否已完成一次有效操作（成功买入/卖出/观望确认 → true 且阶段结束）
+  /// 交易失败时保持 false、阶段不结束，允许玩家重新选择
+  stageActionCompleted Boolean @default(false)
+  /// 本阶段操作完成时间
+  stageActionAt DateTime?
+  /// 当日**成功买入**次数（开盘 + 收盘两阶段共享，上限 2）
+  buyCountToday Int @default(0)
+  /// 当日**成功卖出**次数（开盘 + 收盘两阶段共享，上限 2）
+  sellCountToday Int @default(0)
+  /// 当日**总操作**次数（V3）：BUY / SELL / HOLD **统一计数**，每日上限 8。
+  /// 与 buyCountToday / sellCountToday 并列而非替代 —— 三者必须同时成立：
+  ///   总操作 ≤ 8  且  买入 ≤ 2  且  卖出 ≤ 2
+  /// 语义：操作是**玩家行为计数器**，与 30m 行情时间轴解耦（时间推进不消耗操作）。
+  operationCountToday Int @default(0)
+  /// 当日已揭示的 30 分钟 K 根数（V3「30m 时间轴」游标）。
+  ///
+  /// 语义（与操作计数**完全解耦**）：
+  ///  - 只决定「玩家当前能看到当日几根 30m K」，由 `advanceSimTradeIntraday` 推进；
+  ///  - **推进它不消耗 `operationCountToday`**；一根 K 也不等于一次操作；
+  ///  - 取值 1~8。**开盘阶段上限 7**（第 8 根 = 15:00 = 当日收盘，
+  ///    必须等到 CLOSE_ANIMATION 才允许揭示，否则会绕过 V2「OPEN 阶段不得揭示当日收盘」红线）；
+  ///  - 进入 CLOSE_ANIMATION 时置 8；进入新交易日时重置为 1。
+  intradayBarCount Int @default(1)
+
+  /* ---------------- V3 确认模式（pending → confirm → execute） ---------------- */
+
+  /// 待确认操作的 action（BUY / SELL / HOLD）；null = 当前无待确认操作。
+  /// 确认模式下玩家先「提交」，由服务端落库为 pending，再由 `/confirm` 真正成交。
+  pendingAction String?
+  /// 待确认操作的比例（HOLD 记 0）
+  pendingPercent Int?
+  /// 提交待确认时所在的阶段 —— 用于**拒绝跨阶段 confirm**（阶段已推进则 pending 失效）
+  pendingStage String?
+  /// 提交待确认时的模拟交易日 —— 用于**拒绝跨交易日 confirm**（已换日则 pending 失效）
+  pendingDate DateTime?
+  /// 股票池类型：STOCK（全部 A 股）| INDEX（指数）| INDUSTRY（行业板块）
+  pool String @default("STOCK")
+
   /// 模拟期间的真实交易日历（JSON 字符串数组，YYYY-MM-DD 升序）
   calendar String
   /// 总交易日数（冗余，= calendar.length）

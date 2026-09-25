@@ -18,6 +18,19 @@ export const LOT_SIZE = 100;
 /** 默认初始资金（模拟账户） */
 export const DEFAULT_INITIAL_CASH = 100_000;
 
+/**
+ * 模拟炒股页的「大盘参照」指数 —— 上证指数 / 深证成指 / 创业板指。
+ *
+ * 与行情中心首页的指数卡口径保持一致；只做展示对照，
+ * **不参与任何交易 / 估值 / 结算计算**（页面只显示点位与涨跌，不放图）。
+ * 代码必须带交易所前缀（库里指数一律带前缀，见 types 的 IndexBar 注释）。
+ */
+export const SIM_TRADE_BENCHMARKS = [
+  { code: "sh000001", name: "上证指数" },
+  { code: "sz399001", name: "深证成指" },
+  { code: "sz399006", name: "创业板指" },
+] as const;
+
 /** 周期中文标签 */
 export const PERIOD_LABELS: Record<string, string> = {
   "1d": "日K",

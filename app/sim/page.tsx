@@ -14,7 +14,7 @@ export const metadata = {
  */
 export default function SimPage() {
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-6">
+    <div className="mx-auto w-full max-w-[1320px] px-4 py-6">
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight">历史模拟交易</h1>
         <p className="mt-1 text-sm text-muted-foreground">
